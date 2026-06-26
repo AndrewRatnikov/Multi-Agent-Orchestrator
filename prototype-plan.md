@@ -63,20 +63,13 @@ memory.md                      ← structured memory bank (manually edited for M
 
 ---
 
-### Phase 1 — Disk Persistence + Pause/Resume (Day 1–2)
+### Phase 1 — Disk Persistence + Pause/Resume ✅
 **Goal:** The single most critical mechanism. Everything else depends on it.
 
-- [ ] Write `run-orchestration.md` — skeleton only, creates the run folder + `state.md`, then stops. No agent calls yet.
-- [ ] Write `resume-orchestration.md` — reads `state.md` from a given run folder, prints current step and status, does nothing else yet.
-- [ ] Define the `state.md` schema precisely:
-  ```markdown
-  step: architect
-  status: paused          # running | paused | failed | done
-  timestamp: 2026-06-26T14:30:22Z
-  last_artifact: runs/run_20260626_143022/prd.md
-  pause_reason: awaiting_human_input
-  ```
-- [ ] Test: run `/run-orchestration`, verify folder + state file created. Run `/resume-orchestration run_20260626_143022`, verify it reads and prints state correctly.
+- [x] Write `run-orchestration.md` — skeleton only, creates the run folder + `state.md`, then stops. No agent calls yet.
+- [x] Write `resume-orchestration.md` — reads `state.md` from a given run folder, prints current step and status, supports `--from {STEP}` override.
+- [x] Define the `state.md` schema (run_id, task, step, status, timestamp, last_artifact, pause_reason, retry_count)
+- [ ] Test: run `/run-orchestration "some task"` in Claude Code, verify folder + state.md created. Run `/resume-orchestration {run_id}`, verify it reads and prints state correctly.
 
 **Done when:** Create → pause → resume cycle works end-to-end on disk, no agents involved.
 
