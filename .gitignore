@@ -1,0 +1,17 @@
+# Run artifacts — too large and noisy to commit
+runs/
+
+# API keys
+.env
+.env.local
+
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
