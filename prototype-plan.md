@@ -46,30 +46,18 @@ memory.md                      ← structured memory bank (manually edited for M
 
 ## Build Phases
 
-### Phase 0 — Scaffolding (Day 1)
+### Phase 0 — Scaffolding ✅
 **Goal:** Skeleton in place, folder conventions established, nothing runs yet.
 
-- [ ] `git init` in the project root
+- [x] `git init` in the project root
 - [ ] Create a GitHub repo and add it as remote: `git remote add origin git@github.com:<you>/ai-orchestrator.git`
-- [ ] Create initial `.gitignore`:
-  ```
-  runs/          # run artifacts — too large and noisy to commit
-  .env           # API keys
-  node_modules/
-  ```
-- [ ] Create `.claude/commands/` directory
-- [ ] Create `runs/` directory with a `.gitkeep`
-- [ ] Write `memory.md` with empty named sections:
-  ```markdown
-  ## Testing conventions
-  ## Architecture decisions  
-  ## Known gotchas
-  ## Run history
-  ```
-- [ ] Write `state.md` template (step name, status, timestamp, last artifact path)
-- [ ] Add `runs/` to `.gitignore` (run artifacts shouldn't be committed by default)
-
-- [ ] Initial commit: `git add . && git commit -m "chore: project scaffold"` + push
+- [x] Create initial `.gitignore` (excludes `runs/`, `.env`, `node_modules`, `.DS_Store`)
+- [x] Create `.claude/commands/` and `.claude/scripts/` directories
+- [x] Create `runs/` directory with a `.gitkeep`
+- [x] Write `memory.md` with named sections (Testing conventions, Architecture decisions, Known gotchas, Run history)
+- [x] Add `runs/` to `.gitignore`
+- [x] Add `README.md` and `LICENSE` (MIT)
+- [ ] Initial commit + push: `rm .git/index.lock && git add . && git commit -m "chore: project scaffold" && git push -u origin main`
 
 **Done when:** Repo is on GitHub, directory structure in place, `runs/` excluded from tracking.
 
