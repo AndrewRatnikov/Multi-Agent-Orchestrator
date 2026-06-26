@@ -75,20 +75,23 @@ memory.md                      ← structured memory bank (manually edited for M
 
 ---
 
-### Phase 2 — Repo Digest Generator (Day 2)
+### Phase 2 — Repo Digest Generator ✅
 **Goal:** Architect has real grounding before writing a single path.
 
-Write `.claude/scripts/repo-digest.sh`:
-- Directory tree, depth 3 (`find . -maxdepth 3 -type f`)
-- Contents of `package.json` (deps + scripts section only — strip devDependencies if large)
-- List of existing component files similar to the task (e.g., `find src/components -name "*.tsx"`)
-- Test command extracted from `package.json` scripts
+`repo-digest.sh` generates:
+- Directory tree (depth 3, excludes node_modules/dist/runs/.git)
+- `package.json` scripts + dependencies only (no devDependencies)
+- Test command extracted from scripts
+- All `.tsx` / `.ts` / `.py` source files
+- Similar files matched against task hint keywords
+- Existing test files
+- `tsconfig.json` path aliases + Jest config
 
-Output: `runs/{run_id}/repo-digest.md`. Cached at run start — `resume-orchestration.md` must **not** regenerate it.
+Output: `runs/{run_id}/repo-digest.md`. Cached — script skips if file already exists.
 
-- [ ] Write the script
-- [ ] Call it from `run-orchestration.md` as the first step after folder creation
-- [ ] Verify output is readable and under ~2000 tokens (trim if not)
+- [x] Write `.claude/scripts/repo-digest.sh`
+- [x] Call it from `run-orchestration.md` after folder creation (Step 4), with task hint passed through
+- [ ] Verify output is readable and under ~2000 tokens (run `/run-orchestration` against your target repo and check)
 
 **Done when:** `/run-orchestration` creates a run folder containing a populated `repo-digest.md`.
 
