@@ -173,33 +173,20 @@ Timeout routing (in `run-orchestration.md`):
 
 ---
 
-### Phase 5 — Wire the Orchestrator (Day 6–7)
+### Phase 5 — Wire the Orchestrator ✅
 
 **Goal:** `/run-orchestration <idea>` runs the full pipeline end-to-end.
 
-Update `run-orchestration.md` to sequence all stages in order, with:
-
-```
-1. Create run folder + state.md
-2. Generate repo digest → cache to runs/{id}/repo-digest.md
-3. Call _product-agent → writes prd.md → if questions, pause
-4. Call _architect-agent → writes plan.md → if questions, pause
-5. Call _tester-agent → writes tests/
-6. Call _test-reviewer-agent → PASS/FAIL
-   - FAIL: inject feedback, retry Tester (max 2 retries), then stop
-7. Run run-tests.sh (pre-flight: do tests even compile/parse?)
-8. Call _coder-agent → writes code/
-9. Run run-tests.sh (real ground truth)
-   - TIMEOUT: route back to _test-reviewer-agent
-   - FAIL: retry Coder (max 2 retries), then stop
-   - PASS: continue
-10. Update state.md to done
-11. Append run summary to memory.md Run history section
-```
-
-Update `resume-orchestration.md` to accept `--from <step>` and jump to that step using saved artifacts from the run folder.
-
-- [ ] Wire all stages
+- [x] `run-orchestration.md` fully wired — 7 stages in sequence:
+  - Stage 0: setup (run folder, state.md, report.md, repo digest)
+  - Stage 1: Product agent → pause if questions
+  - Stage 2: Architect agent → pause if questions
+  - Stage 3: Tester agent
+  - Stage 4: Test-Reviewer gate → retry Tester up to 2x with injected feedback, then stop
+  - Stage 5: Coder agent → pause on CONTRACT_MISMATCH
+  - Stage 6: Test sandbox → TIMEOUT routes to Test-Reviewer, FAIL retries Coder up to 2x, PASS continues
+  - Stage 7: Done — updates state, appends run history to memory.md, tells user where artifacts are
+- [x] `resume-orchestration.md` fully wired — reads state.md, archives overwritten artifacts, executes from any named step (`product` / `architect` / `tester` / `test-reviewer` / `coder` / `sandbox`), carries retry and feedback logic identical to run-orchestration
 - [ ] Test pause: answer a Product agent question, verify PRD written, verify resume from Architect works
 - [ ] Test failure: force a test failure, verify report written, verify `--from coder` resumes correctly
 

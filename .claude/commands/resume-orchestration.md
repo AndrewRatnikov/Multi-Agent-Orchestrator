@@ -1,6 +1,6 @@
 # Resume Orchestration Pipeline
 
-You are the master orchestrator resuming a paused or failed pipeline run.
+You are the master orchestrator resuming a paused or failed pipeline run. You pick up from a specific step using artifacts already on disk — you do not re-run earlier stages unless explicitly told to.
 
 ## Arguments
 
@@ -11,60 +11,108 @@ $ARGUMENTS
 Parse `$ARGUMENTS` as: `{RUN_ID} [--from {STEP}]`
 
 Examples:
-- `run_20260626_143022` — resume from where the run left off
-- `run_20260626_143022 --from coder` — override and resume from a specific step
+- `run_20260626_143022` — resume from where the run left off (reads state.md)
+- `run_20260626_143022 --from architect` — override and resume from a specific step
 
-If no RUN_ID is provided, list all folders in `runs/` and ask the user which one to resume.
+If no RUN_ID is provided, list folders in `runs/` and ask the user which to resume.
+
+---
 
 ## Step 1 — Read state
 
-Read `runs/{RUN_ID}/state.md` and display its full contents to the user clearly formatted, e.g.:
+Read `runs/{RUN_ID}/state.md` and display it clearly:
 
 ```
-Run:      run_20260626_143022
-Task:     Add BudgetSummary card component
-Step:     tester
-Status:   paused
-Paused:   awaiting_human_input
-Last artifact: runs/run_20260626_143022/plan.md
-Retries:  0
+Run:     {run_id}
+Task:    {task}
+Repo:    {repo}
+Step:    {step}
+Status:  {status}
+Paused:  {pause_reason}
+Retries: {retry_count}
 ```
 
-Also read and display the last 20 lines of `runs/{RUN_ID}/report.md` so the user sees the most recent stage output.
+Also show the last 20 lines of `runs/{RUN_ID}/report.md` so the user sees the most recent output.
 
-## Step 2 — Determine resume point
+Set:
+- `REPO` = the `repo` field from state.md (resolve to absolute path)
+- `TASK` = the `task` field from state.md
+- `RESUME_FROM` = `--from` value if provided, otherwise the `step` field from state.md
 
-- If `--from {STEP}` was provided, set `resume_step = {STEP}`
-- Otherwise, set `resume_step` = the `step` value from `state.md`
+---
 
-Valid step values: `product` | `architect` | `tester` | `test-reviewer` | `coder`
+## Step 2 — Archive any artifact that will be overwritten
 
-If the step value is invalid or unrecognised, tell the user and list the valid options.
+If resuming from a step that writes an artifact that already exists, archive it first:
 
-## Step 3 — Archive overwritten artifacts
+| Resuming from | Artifact to archive |
+|---------------|-------------------|
+| `product`     | `runs/{RUN_ID}/prd.md` → `archive/prd_before_resume_{timestamp}.md` |
+| `architect`   | `runs/{RUN_ID}/plan.md` → `archive/plan_before_resume_{timestamp}.md` |
+| `tester`      | `runs/{RUN_ID}/tests/` → `archive/tests_before_resume_{timestamp}/` |
+| `coder`       | `runs/{RUN_ID}/code/` → `archive/code_before_resume_{timestamp}/` |
 
-If resuming from a step that would overwrite an existing artifact (e.g. resuming from `tester` when `runs/{RUN_ID}/tests/` already exists), copy the existing artifact into `runs/{RUN_ID}/archive/` before overwriting:
+Run the archive command before overwriting. Skip if the artifact doesn't exist yet.
 
-```bash
-cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_before_resume_$(date +%H%M%S)
-```
+---
 
-This preserves history without needing real version control.
-
-## Step 4 — Update state and proceed
+## Step 3 — Update state and proceed
 
 Update `runs/{RUN_ID}/state.md`:
-- Set `step` to `resume_step`
+- Set `step` to `RESUME_FROM`
 - Set `status` to `running`
 - Clear `pause_reason`
-- Set `timestamp` to now
+- Update `timestamp`
 
 Append to `runs/{RUN_ID}/report.md`:
 ```
 ---
-[RESUMED] step: {resume_step} at {TIMESTAMP}
+[RESUMED] step: {RESUME_FROM} at {TIMESTAMP}
 ```
 
-Then proceed to execute the appropriate stage.
+---
 
-> **Note (Phase 1 skeleton):** Pipeline stages are not yet wired. For now, stop after updating state.md and report.md, and confirm to the user what step the run will resume from. Print the updated state.md contents.
+## Step 4 — Execute from RESUME_FROM
+
+Execute the stages in order starting from RESUME_FROM. For each stage, follow the same logic as `run-orchestration.md`. All prior artifacts (prd.md, plan.md, repo-digest.md, tests/) are already on disk — read them directly rather than regenerating.
+
+**Do not regenerate the repo digest** — it is cached in `runs/{RUN_ID}/repo-digest.md`.
+
+### If RESUME_FROM = `product`
+Read `.claude/commands/_product-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
+Then continue through architect → tester → test-reviewer → coder → sandbox → done.
+
+### If RESUME_FROM = `architect`
+Read `.claude/commands/_architect-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
+Then continue through tester → test-reviewer → coder → sandbox → done.
+
+### If RESUME_FROM = `tester`
+Read `.claude/commands/_tester-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
+Then continue through test-reviewer → coder → sandbox → done.
+
+### If RESUME_FROM = `test-reviewer`
+Read `.claude/commands/_test-reviewer-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
+Apply the same retry/stop logic as in `run-orchestration.md` Stage 4.
+Then continue through coder → sandbox → done (if reviewer passes).
+
+### If RESUME_FROM = `coder`
+Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
+Read `.claude/commands/_coder-agent.md` and execute with `--run {RUN_ID} --repo {REPO} --feedback "{LAST_FAIL_OUTPUT}"`.
+Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
+Then run sandbox → done (if tests pass).
+
+### If RESUME_FROM = `sandbox`
+Read the test command from `runs/{RUN_ID}/repo-digest.md` (`## Test command` section).
+Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" "{TEST_CMD}" 120`
+Apply the same PASS/FAIL/TIMEOUT routing as in `run-orchestration.md` Stage 6.
+
+### If RESUME_FROM is unrecognised
+Tell the user valid values are: `product`, `architect`, `tester`, `test-reviewer`, `coder`, `sandbox`.
+Stop.
+
+---
+
+## Completion
+
+When the pipeline completes (all tests pass), follow the same Stage 7 logic as `run-orchestration.md`:
+update state.md to done, append to report.md, add a run history entry to memory.md, and tell the user.

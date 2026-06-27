@@ -2,48 +2,45 @@
 
 You are the master orchestrator for the AI dev pipeline. Your job is to run a spec-driven, test-first pipeline that turns an idea into a tested, validated implementation.
 
+You sequence the following stages in order, reading each agent's instruction file and executing it inline. You do not skip steps, invent shortcuts, or call external services — you follow the stage instructions exactly.
+
 ## Arguments
 
 ```
 $ARGUMENTS
 ```
 
-Parse `$ARGUMENTS` as follows:
-- Everything before `--repo` is the **task description**
-- `--repo <path>` is the **target repository path** (optional, defaults to current directory)
+Parse `$ARGUMENTS` as:
+- Everything before `--repo` is the **task description** (TASK)
+- `--repo <path>` is the **target repository path** (REPO), defaults to `$(pwd)`
 
-Examples:
+If TASK is empty, ask the user what they want to build and wait for their answer.
+
+Verify REPO exists and has a `package.json` or `pyproject.toml`. If not, tell the user and stop.
+
+Resolve REPO to an absolute path:
+```bash
+REPO=$(cd "{REPO}" && pwd)
+echo "$REPO"
 ```
-/run-orchestration add a BudgetSummary card component --repo ~/code/personal-finance-tracker
-/run-orchestration fix the login redirect bug --repo /Users/andrew/projects/my-app
-/run-orchestration add dark mode toggle
-```
 
-If the task description is empty, ask the user to describe the feature, bug fix, or task, then wait for their response.
+---
 
-If `--repo` is not provided, use `$(pwd)` as the repo path and inform the user.
+## STAGE 0 — Setup
 
-Store both values — you will use them throughout all subsequent steps:
-- `TASK` = the task description
-- `REPO` = the resolved absolute path to the target repository
-
-Verify the repo path exists and contains a recognisable project (has `package.json`, `pyproject.toml`, or similar). If not, tell the user and stop.
-
-## Step 1 — Create the run folder
-
-Run:
+### Create run folder
 
 ```bash
 RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "/path/to/AI-Orchestrator/runs/$RUN_ID/archive"
+mkdir -p "$ORCHESTRATOR_ROOT/runs/$RUN_ID/archive"
 echo "$RUN_ID"
 ```
 
-Replace `/path/to/AI-Orchestrator` with the actual absolute path of the orchestrator project (the directory containing this `.claude/` folder). Runs are always stored here, not inside the target repo.
+Where `ORCHESTRATOR_ROOT` is the absolute path to the directory containing this `.claude/` folder. Determine it by finding the `.claude` directory above this file.
 
-## Step 2 — Write state.md
+### Write state.md
 
-Write `runs/{RUN_ID}/state.md` inside the orchestrator project:
+Write `runs/{RUN_ID}/state.md`:
 
 ```
 run_id: {RUN_ID}
@@ -57,10 +54,7 @@ pause_reason:
 retry_count: 0
 ```
 
-Valid `step` values (in order): `init` → `product` → `architect` → `tester` → `test-reviewer` → `coder` → `done`
-Valid `status` values: `running` | `paused` | `failed` | `done`
-
-## Step 3 — Write report.md
+### Write report.md
 
 Write `runs/{RUN_ID}/report.md`:
 
@@ -76,24 +70,191 @@ Write `runs/{RUN_ID}/report.md`:
 ## Stage log
 ```
 
-## Step 4 — Generate repo digest
+### Generate repo digest
 
 ```bash
 bash .claude/scripts/repo-digest.sh "{REPO}" "{RUN_ID}" "{TASK}"
 ```
 
-The script writes `runs/{RUN_ID}/repo-digest.md` and prints a token estimate.
-If it warns the digest is large (>2000 tokens), read the file and trim the largest section before continuing.
-The script skips generation if the digest already exists (cache hit on resume).
+If the digest warns it is large (>2000 tokens), trim the file list section before continuing.
 
-## Step 5 — Confirm and proceed
+Tell the user: "Run `{RUN_ID}` started. Repo digest ready. Starting pipeline..."
+
+---
+
+## STAGE 1 — Product Agent
+
+Update `runs/{RUN_ID}/state.md`: set `step: product`, `status: running`.
+
+Read the file `.claude/commands/_product-agent.md` in full.
+Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
+
+After the Product agent finishes, read `runs/{RUN_ID}/state.md`.
+
+- If `status: paused` → Stop. Tell the user:
+  "Pipeline paused at **product** stage. Answer the questions above, then run:
+  `/resume-orchestration {RUN_ID} --from product`"
+  Do not continue.
+
+- If `status: running` and `prd.md` exists → continue to Stage 2.
+
+---
+
+## STAGE 2 — Architect Agent
+
+Update `runs/{RUN_ID}/state.md`: set `step: architect`, `status: running`.
+
+Read the file `.claude/commands/_architect-agent.md` in full.
+Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
+
+After the Architect agent finishes, read `runs/{RUN_ID}/state.md`.
+
+- If `status: paused` → Stop. Tell the user:
+  "Pipeline paused at **architect** stage. Answer the questions above, then run:
+  `/resume-orchestration {RUN_ID} --from architect`"
+  Do not continue.
+
+- If `status: running` and `plan.md` exists → continue to Stage 3.
+
+---
+
+## STAGE 3 — Tester Agent
+
+Update `runs/{RUN_ID}/state.md`: set `step: tester`, `status: running`, `retry_count: 0`.
+
+Read the file `.claude/commands/_tester-agent.md` in full.
+Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
+
+After the Tester agent finishes, continue to Stage 4.
+
+---
+
+## STAGE 4 — Test-Reviewer Gate
+
+Update `runs/{RUN_ID}/state.md`: set `step: test-reviewer`, `status: running`.
+
+Read the file `.claude/commands/_test-reviewer-agent.md` in full.
+Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
+
+After the Test-Reviewer finishes, read `runs/{RUN_ID}/state.md`.
+
+**If `status: failed` (reviewer rejected the tests):**
+
+Read `retry_count` from state.md.
+
+- If `retry_count >= 2` → Stop. Tell the user:
+  "Test-reviewer retry cap reached (2/2). Human intervention required.
+  Review `runs/{RUN_ID}/report.md` for the feedback, fix the tests manually or run:
+  `/resume-orchestration {RUN_ID} --from tester`"
+  Do not continue.
+
+- If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
+  "Test-reviewer rejected. Retrying Tester with feedback (attempt {retry_count}/2)..."
+
+  Read the FAIL feedback from the last section of `runs/{RUN_ID}/report.md`.
+  Archive the current tests: `cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}`
+
+  Re-run Stage 3 (Tester), injecting the reviewer feedback into the agent prompt as additional context:
+  "The previous test attempt was rejected by the test-reviewer with this feedback: {FEEDBACK}. Fix the issues listed before writing the new tests."
+
+  Then re-run Stage 4 again.
+
+**If `status: running` (reviewer approved):** continue to Stage 5.
+
+---
+
+## STAGE 5 — Coder Agent
+
+Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_count: 0`.
+
+Read the file `.claude/commands/_coder-agent.md` in full.
+Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
+
+After the Coder agent finishes, read `runs/{RUN_ID}/state.md`.
+
+- If `status: paused` and `pause_reason: contract-mismatch` → Stop. Tell the user:
+  "Pipeline paused: CONTRACT_MISMATCH detected. The Interface Contract needs correction.
+  Run: `/resume-orchestration {RUN_ID} --from architect`
+  See `runs/{RUN_ID}/report.md` for details."
+  Do not continue.
+
+- If `status: running` → continue to Stage 6.
+
+---
+
+## STAGE 6 — Test Sandbox
+
+Update `runs/{RUN_ID}/state.md`: set `step: sandbox`, `status: running`.
+
+Read the test command from `runs/{RUN_ID}/repo-digest.md` (look for the `## Test command` section).
+
+Run the sandbox:
+```bash
+bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" "{TEST_CMD}" 120
+SANDBOX_EXIT=$?
+```
+
+Read the result from the last section of `runs/{RUN_ID}/report.md`.
+
+**If exit code 0 (PASS):** continue to Stage 7.
+
+**If exit code 2 (TIMEOUT):**
+Tell the user: "Tests timed out. This usually means a test is hanging (unresolved promise, real network call). Routing back to Test-Reviewer."
+Re-run Stage 4 (Test-Reviewer) with this note prepended:
+"IMPORTANT: The previous test run timed out after 120s. A test is likely hanging. Check all tests for unresolved promises, missing mocks, or real network calls."
+Then re-run Stage 5 and 6 if the reviewer passes.
+
+**If exit code 1 (FAIL):**
+Read `retry_count` from state.md.
+
+- If `retry_count >= 2` → Stop. Tell the user:
+  "Coder retry cap reached (2/2). Human intervention required.
+  Review `runs/{RUN_ID}/report.md` for the test failure output, then run:
+  `/resume-orchestration {RUN_ID} --from coder`"
+  Do not continue.
+
+- If `retry_count < 2` → increment `retry_count`. Tell the user:
+  "Tests failed. Retrying Coder with failure output as feedback (attempt {retry_count}/2)..."
+
+  Read the failure output from `runs/{RUN_ID}/report.md`.
+  Archive current code: `cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}`
+
+  Re-run Stage 5 (Coder) with `--feedback "{FAILURE_OUTPUT}"` injected.
+  Then re-run Stage 6.
+
+---
+
+## STAGE 7 — Done
+
+Update `runs/{RUN_ID}/state.md`:
+- Set `step: done`
+- Set `status: done`
+- Set `last_artifact: runs/{RUN_ID}/code/`
+- Update `timestamp`
+
+Append to `runs/{RUN_ID}/report.md`:
+```
+---
+## Result: PASS ✓
+
+All tests passed. Pipeline complete.
+Finished: {TIMESTAMP}
+```
+
+Append a one-line entry to `memory.md` under `## Run history`:
+```
+- {RUN_ID} | {DATE} | task: {TASK} | result: PASS
+```
 
 Tell the user:
-- Run ID
-- Target repo path
-- Repo digest token estimate
-- That you are now starting the pipeline with the Product agent
+"✓ Pipeline complete! All tests passed.
 
-Update `state.md` to set `step: product`, then proceed to the Product agent stage.
+**Run:** {RUN_ID}
+**Artifacts:**
+- PRD: `runs/{RUN_ID}/prd.md`
+- Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
+- Tests: `runs/{RUN_ID}/tests/`
+- Implementation: `runs/{RUN_ID}/code/`
+- Full report: `runs/{RUN_ID}/report.md`
 
-> **Note (Phase 1/2 skeleton):** Pipeline agent stages are not yet wired. For now, stop here and confirm to the user that the run folder, state.md, and repo-digest.md were created successfully. Print the contents of state.md and the first 30 lines of repo-digest.md so they can verify.
+To apply the implementation to your repo, copy `runs/{RUN_ID}/code/` into `{REPO}`."
