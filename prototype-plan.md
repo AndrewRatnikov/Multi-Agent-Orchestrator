@@ -165,8 +165,9 @@ Timeout routing (in `run-orchestration.md`):
 - `FAIL` → retry Coder (max 2 retries), then stop-and-report
 - `PASS` → continue
 
-- [ ] Write the script
-- [ ] Test it manually: copy a trivial passing test into the sandbox, verify `PASS`. Copy a failing test, verify `FAIL`. Hang a test artificially, verify `TIMEOUT` and clean exit.
+- [x] Write `run-tests.sh` — git worktree sandbox, TypeScript pre-flight, `npm install` if needed, two-layer timeout (runner + hard subprocess cap), classifies PASS/FAIL/TIMEOUT/ERROR, always cleans up via `trap EXIT`, writes full output to `report.md`
+- [x] Write `log-cost.sh` — appends per-stage token counts + estimated cost to `report.md` and a running total to `cost.md`
+- [ ] Test manually: run a passing test → verify PASS. Run a failing test → verify FAIL. Inject `while(true){}` → verify TIMEOUT + worktree cleaned up.
 
 **Done when:** All three exit conditions produce the correct classification and the worktree is always cleaned up.
 
