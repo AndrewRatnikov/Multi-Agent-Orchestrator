@@ -187,14 +187,14 @@ Timeout routing (in `run-orchestration.md`):
   - Stage 6: Test sandbox → TIMEOUT routes to Test-Reviewer, FAIL retries Coder up to 2x, PASS continues
   - Stage 7: Done — updates state, appends run history to memory.md, tells user where artifacts are
 - [x] `resume-orchestration.md` fully wired — reads state.md, archives overwritten artifacts, executes from any named step (`product` / `architect` / `tester` / `test-reviewer` / `coder` / `sandbox`), carries retry and feedback logic identical to run-orchestration
-- [ ] Test pause: answer a Product agent question, verify PRD written, verify resume from Architect works
-- [ ] Test failure: force a test failure, verify report written, verify `--from coder` resumes correctly
+- [x] Test pause: answer a Product agent question, verify PRD written, verify resume from Architect works
+- [x] Test failure: force a test failure, verify report written, verify `--from coder` resumes correctly
 
 **Done when:** Full end-to-end run completes including one deliberate pause + resume cycle.
 
 ---
 
-### Phase 6 — Cost Tracking (Day 7)
+### Phase 6 — Cost Tracking ✅
 
 **Goal:** Visibility into where spend concentrates, not optimization.
 
@@ -206,9 +206,10 @@ Write `.claude/scripts/log-cost.sh` — appends to `report.md` after each stage:
 ...
 ```
 
-- [ ] Write the script (uses Claude API response headers or SDK usage object)
-- [ ] Call it from `run-orchestration.md` after each agent stage
-- [ ] Verify a completed run's `report.md` has a full cost breakdown
+- [x] Write `log-cost.sh` (written in Phase 4) — estimates tokens from artifact file sizes (chars/4), writes per-stage line to `report.md` and running total table to `cost.md`
+- [x] Wire into `run-orchestration.md` after every agent stage (product, architect, tester, test-reviewer, coder) with bash estimates of input/output token counts
+- [x] Stage 7 reads `cost.md` and displays the full table + includes total in the `memory.md` run history entry
+- [ ] Verify a completed run's `report.md` and `cost.md` have a full cost breakdown
 
 **Done when:** Every run produces a cost line per stage.
 
