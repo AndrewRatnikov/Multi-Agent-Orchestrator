@@ -122,31 +122,36 @@ echo "Copying test files into sandbox..."
 # Test files also mirror the repo structure
 cp -r "$RUN_DIR/tests/." "$SANDBOX/"
 
-# ── Step 4: Pre-flight — TypeScript syntax check (fast, no execution) ─────────
-if command -v npx &>/dev/null && [ -f "$SANDBOX/tsconfig.json" ]; then
-  echo "Pre-flight: TypeScript syntax check..."
-  if ! npx --prefix "$SANDBOX" tsc --noEmit --skipLibCheck 2>"$OUTPUT_FILE"; then
-    TS_ERRORS=$(cat "$OUTPUT_FILE")
-    echo "Pre-flight FAILED: TypeScript errors detected."
-    echo "$TS_ERRORS"
-    log_report "### Result: FAIL (TypeScript syntax errors — pre-flight)"
-    log_report ""
-    log_report '```'
-    log_report "$TS_ERRORS"
-    log_report '```'
-    # Don't exit — let the real test runner surface the errors too
-    # (tsc errors are informational; the exit code comes from the test runner)
-  else
-    echo "Pre-flight: TypeScript OK."
-  fi
-fi
-
-# ── Step 5: Install dependencies if node_modules is missing ───────────────────
+# ── Step 4: Install dependencies if node_modules is missing ───────────────────
 if [ ! -d "$SANDBOX/node_modules" ] && [ -f "$SANDBOX/package.json" ]; then
   echo "Installing dependencies (node_modules not present in worktree)..."
   npm install --prefix "$SANDBOX" --silent 2>&1 | tail -5 \
     || { echo "ERROR: npm install failed."; log_report "**ERROR:** npm install failed in sandbox."; exit 3; }
   echo "Dependencies installed."
+fi
+
+# ── Step 5: Pre-flight — TypeScript syntax check (fast, no execution) ─────────
+# Runs AFTER npm install so node_modules exists. Uses the sandbox's own local
+# tsc only — never `npx`, which resolves and installs an arbitrary `tsc` package
+# from the registry if the repo doesn't have one (silently wrong compiler).
+# This is informational only: it is never the test verdict, never `### Result:`.
+if [ -f "$SANDBOX/node_modules/.bin/tsc" ] && [ -f "$SANDBOX/tsconfig.json" ]; then
+  echo "Pre-flight: TypeScript check..."
+  if ! (cd "$SANDBOX" && ./node_modules/.bin/tsc --noEmit --skipLibCheck) >"$OUTPUT_FILE" 2>&1; then
+    TS_ERRORS=$(cat "$OUTPUT_FILE")
+    echo "Pre-flight: tsc reported errors (informational — not the test verdict)."
+    echo "$TS_ERRORS"
+    log_report "### Pre-flight: tsc errors (informational — not the test verdict)"
+    log_report ""
+    log_report '```'
+    log_report "$(head -40 "$OUTPUT_FILE")"
+    log_report '```'
+    # Don't exit — the real test verdict comes only from Step 6 below.
+  else
+    echo "Pre-flight: TypeScript OK."
+  fi
+else
+  echo "Pre-flight: skipped (no local tsc)."
 fi
 
 # ── Step 6: Run the tests with two-layer timeout ──────────────────────────────
