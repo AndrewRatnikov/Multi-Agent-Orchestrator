@@ -153,9 +153,12 @@ if [ -f "$REPO_PATH/tsconfig.json" ]; then
 fi
 
 if [ -s "$TMP/contract_files" ]; then
+  # Note: '../'-prefixed imports are skipped — they can't be resolved without
+  # knowing each test file's location in the target tree. False negative is
+  # acceptable by design (the sandbox will fail on a genuinely bad path anyway).
   grep -rhoE "^[[:space:]]*import[^;]*['\"][^'\"]+['\"]" "$TESTS_DIR" 2>/dev/null \
     | grep -oE "['\"][^'\"]+['\"]\$" | tr -d "'\"" \
-    | grep -E '^(\.|@/)' | sort -u > "$TMP/code_imports"
+    | grep -E '^(\./|@/)' | sort -u > "$TMP/code_imports"
 
   while IFS= read -r imp; do
     [ -z "$imp" ] && continue
@@ -165,9 +168,22 @@ if [ -s "$TMP/contract_files" ]; then
     fi
     resolved="${resolved%.ts}"; resolved="${resolved%.tsx}"; resolved="${resolved%.js}"; resolved="${resolved%.jsx}"
     resolved="${resolved#./}"
-    if ! grep -qF "$resolved" "$TMP/contract_files"; then
-      add_violation "IMPORT_NOT_IN_CONTRACT: test imports '$imp' (resolved: $resolved) which does not match any Interface Contract File: path"
+    # An import is legitimate if it matches a contract File: path OR already
+    # exists in the target repo (tests may import existing helpers/types/utils
+    # that are correctly absent from the contract — only NEW names must come
+    # from the contract).
+    if grep -qF "$resolved" "$TMP/contract_files"; then
+      continue
     fi
+    exists_in_repo=0
+    for ext in ts tsx js jsx; do
+      if [ -f "$REPO_PATH/$resolved.$ext" ]; then exists_in_repo=1; break; fi
+    done
+    if [ "$exists_in_repo" -eq 1 ] || [ -d "$REPO_PATH/$resolved" ] \
+       || [ -f "$REPO_PATH/$resolved/index.ts" ] || [ -f "$REPO_PATH/$resolved/index.tsx" ]; then
+      continue
+    fi
+    add_violation "IMPORT_NOT_IN_CONTRACT: test imports '$imp' (resolved: $resolved) which matches neither an Interface Contract File: path nor an existing file in the target repo"
   done < "$TMP/code_imports"
 fi
 

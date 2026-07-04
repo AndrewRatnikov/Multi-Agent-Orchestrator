@@ -74,7 +74,7 @@ Append to `runs/{RUN_ID}/report.md`:
 
 ## Step 4 — Execute from RESUME_FROM
 
-Execute the stages in order starting from RESUME_FROM. For each stage, follow the same logic as `run-orchestration.md`. All prior artifacts (prd.md, plan.md, repo-digest.md, tests/) are already on disk — read them directly rather than regenerating.
+Execute the stages in order starting from RESUME_FROM. For each stage, follow the same logic as `run-orchestration.md` — including the retry_count exceptions: never reset `retry_count` when re-entering a stage as a retry. All prior artifacts (prd.md, plan.md, repo-digest.md, tests/) are already on disk — read them directly rather than regenerating.
 
 **Do not regenerate the repo digest** — it is cached in `runs/{RUN_ID}/repo-digest.md`.
 

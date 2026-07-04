@@ -46,10 +46,13 @@ run_with_timeout() {
     gtimeout "$secs" "$@"
   else
     # perl is present on every macOS; SIGALRM kills the child, exit 124 mimics GNU timeout
+    # setpgrp puts the child in its own process group so kill(-$pid) reaches the
+    # whole tree (bash -c + the test runner it spawns), not just the direct child —
+    # without it the kill targets a nonexistent group and the hung process leaks.
     perl -e '
       my $t = shift @ARGV;
       my $pid = fork;
-      if ($pid == 0) { exec @ARGV; exit 127; }
+      if ($pid == 0) { setpgrp(0, 0); exec @ARGV; exit 127; }
       $SIG{ALRM} = sub { kill "KILL", -$pid; exit 124 };
       alarm $t;
       waitpid $pid, 0;

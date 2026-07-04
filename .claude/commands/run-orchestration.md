@@ -141,6 +141,7 @@ Read `runs/{RUN_ID}/state.md`.
 ## STAGE 3 — Tester Agent
 
 Update `runs/{RUN_ID}/state.md`: set `step: tester`, `status: running`, `retry_count: 0`.
+**Exception:** if you are re-entering this stage as a retry (from Stage 4a or 4b), do NOT reset `retry_count` — it must keep the value the retry logic just incremented, or the retry cap can never trip.
 
 Read the file `.claude/commands/_tester-agent.md` in full.
 Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
@@ -193,7 +194,7 @@ Read `retry_count` from state.md.
   cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}
   ```
 
-  Re-run Stage 3 (Tester) injecting the violation list:
+  Re-run Stage 3 (Tester) **without resetting retry_count** (see Stage 3 exception), injecting the violation list:
   "The mechanical contract check failed with these violations: {VIOLATIONS}. Fix every one before writing the new tests — these are not style suggestions, they are exact name/path/package mismatches."
 
   Then re-run Stage 4 from Stage 4a.
@@ -233,7 +234,7 @@ Read `retry_count` from state.md.
   cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}
   ```
 
-  Re-run Stage 3 (Tester) injecting the reviewer feedback:
+  Re-run Stage 3 (Tester) **without resetting retry_count** (see Stage 3 exception), injecting the reviewer feedback:
   "The previous test attempt was rejected by the test-reviewer with this feedback: {FEEDBACK}. Fix the issues listed before writing the new tests."
 
   Then re-run Stage 4 from Stage 4a (the contract check must pass again against the rewritten tests).
@@ -252,6 +253,7 @@ Continue to Stage 5.
 ## STAGE 5 — Coder Agent
 
 Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_count: 0`.
+**Exception:** if you are re-entering this stage as a retry (from Stage 5b or Stage 6), do NOT reset `retry_count` — it must keep the value the retry logic just incremented, or the retry cap can never trip.
 
 Read the file `.claude/commands/_coder-agent.md` in full.
 Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
@@ -324,7 +326,7 @@ Read `retry_count` from state.md.
   cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
   ```
 
-  Re-run Stage 5 (Coder) with `--feedback "{VIOLATIONS}"` injected.
+  Re-run Stage 5 (Coder) **without resetting retry_count** (see Stage 5 exception) with `--feedback "{VIOLATIONS}"` injected.
   Then re-run Stage 5b.
 
 ---
@@ -367,7 +369,7 @@ Read `retry_count` from state.md.
   cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
   ```
 
-  Re-run Stage 5 (Coder) with `--feedback "{FAILURE_OUTPUT}"` injected.
+  Re-run Stage 5 (Coder) **without resetting retry_count** (see Stage 5 exception) with `--feedback "{FAILURE_OUTPUT}"` injected.
   Then re-run Stage 6.
 
 **If exit code 3 or any other unlisted code (ERROR):**
