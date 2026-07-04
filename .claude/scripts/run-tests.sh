@@ -16,7 +16,7 @@
 #   0 = PASS
 #   1 = FAIL
 #   2 = TIMEOUT
-#   3 = ERROR (setup failed before tests could run)
+#   3 = ERROR (setup failed before tests could run, or infrastructure broken — exit 126/127)
 
 set -euo pipefail
 
@@ -35,6 +35,27 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 log_report() {
   echo "$1" >> "$REPORT"
+}
+
+# ── Portable timeout: GNU timeout → gtimeout (brew coreutils) → perl fallback ──
+run_with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    # perl is present on every macOS; SIGALRM kills the child, exit 124 mimics GNU timeout
+    perl -e '
+      my $t = shift @ARGV;
+      my $pid = fork;
+      if ($pid == 0) { exec @ARGV; exit 127; }
+      $SIG{ALRM} = sub { kill "KILL", -$pid; exit 124 };
+      alarm $t;
+      waitpid $pid, 0;
+      exit ($? >> 8);
+    ' "$secs" "$@"
+  fi
 }
 
 cleanup() {
@@ -135,8 +156,10 @@ echo ""
 # Layer 1 (inner): test runner's own timeout flags are set by the test command itself
 # Layer 2 (outer): hard subprocess cap — catches hangs the runner doesn't catch
 cd "$SANDBOX"
-timeout "$TIMEOUT" bash -c "$TEST_CMD" > "$OUTPUT_FILE" 2>&1
+set +e
+run_with_timeout "$TIMEOUT" bash -c "$TEST_CMD" > "$OUTPUT_FILE" 2>&1
 EXIT_CODE=$?
+set -e
 
 TEST_OUTPUT=$(cat "$OUTPUT_FILE")
 
@@ -165,6 +188,21 @@ elif [ "$EXIT_CODE" -eq 0 ]; then
   echo "✓ PASS — all tests passed"
 
   log_report "### Result: PASS"
+  log_report ""
+  log_report '```'
+  log_report "$TEST_OUTPUT"
+  log_report '```'
+
+elif [ "$EXIT_CODE" -eq 127 ] || [ "$EXIT_CODE" -eq 126 ]; then
+  RESULT="ERROR"
+  echo ""
+  echo "✗ ERROR — sandbox infrastructure is broken (exit code $EXIT_CODE)"
+  echo "  This is NOT a test result. Do not retry the Coder. Fix the environment."
+
+  log_report "### Result: ERROR (infrastructure)"
+  log_report ""
+  log_report "Exit $EXIT_CODE — command not found / not executable. The sandbox itself is broken."
+  log_report "**This is NOT a test result. Do not retry the Coder. Fix the environment.**"
   log_report ""
   log_report '```'
   log_report "$TEST_OUTPUT"

@@ -269,6 +269,12 @@ Read `retry_count` from state.md.
   Re-run Stage 5 (Coder) with `--feedback "{FAILURE_OUTPUT}"` injected.
   Then re-run Stage 6.
 
+**If exit code 3 or any other unlisted code (ERROR):**
+STOP immediately. Update state.md: status: failed, pause_reason: sandbox-infrastructure-error.
+Tell the user the sandbox environment is broken and show the report entry.
+You must NOT manually replicate the sandbox, run tests yourself, or declare
+PASS/FAIL by any other means. The sandbox exit code is the only accepted verdict.
+
 ---
 
 ## STAGE 7 — Done

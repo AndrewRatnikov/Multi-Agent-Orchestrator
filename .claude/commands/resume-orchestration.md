@@ -106,6 +106,12 @@ Read the test command from `runs/{RUN_ID}/repo-digest.md` (`## Test command` sec
 Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" "{TEST_CMD}" 120`
 Apply the same PASS/FAIL/TIMEOUT routing as in `run-orchestration.md` Stage 6.
 
+**If exit code is 3 or any other unlisted code (ERROR):**
+STOP immediately. Update state.md: status: failed, pause_reason: sandbox-infrastructure-error.
+Tell the user the sandbox environment is broken and show the report entry.
+You must NOT manually replicate the sandbox, run tests yourself, or declare
+PASS/FAIL by any other means. The sandbox exit code is the only accepted verdict.
+
 ### If RESUME_FROM is unrecognised
 Tell the user valid values are: `product`, `architect`, `tester`, `test-reviewer`, `coder`, `sandbox`.
 Stop.
