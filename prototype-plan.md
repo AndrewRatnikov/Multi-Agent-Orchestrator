@@ -209,7 +209,7 @@ Write `.claude/scripts/log-cost.sh` — appends to `report.md` after each stage:
 - [x] Write `log-cost.sh` (written in Phase 4) — estimates tokens from artifact file sizes (chars/4), writes per-stage line to `report.md` and running total table to `cost.md`
 - [x] Wire into `run-orchestration.md` after every agent stage (product, architect, tester, test-reviewer, coder) with bash estimates of input/output token counts
 - [x] Stage 7 reads `cost.md` and displays the full table + includes total in the `memory.md` run history entry
-- [ ] Verify a completed run's `report.md` and `cost.md` have a full cost breakdown
+- [x] Verify a completed run's `report.md` and `cost.md` have a full cost breakdown
 
 **Done when:** Every run produces a cost line per stage.
 
