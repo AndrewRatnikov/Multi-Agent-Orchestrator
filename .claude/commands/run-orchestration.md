@@ -395,17 +395,26 @@ Finished: {TIMESTAMP}
 ```
 
 Read the cost summary from `runs/{RUN_ID}/cost.md` and display the full table to the user.
+Every figure in it is a heuristic estimate (chars/4), not real token usage — present it as such.
 
 Append a one-line entry to `memory.md` under `## Run history`:
 ```
-- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | cost: {TOTAL_FROM_COST_MD}
+- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | est-cost: {TOTAL_FROM_COST_MD}
 ```
+
+If this run surfaced a gotcha worth remembering for future runs (a naming convention,
+a config quirk, a dependency trap — anything a future Architect/Coder/Tester would
+otherwise rediscover the hard way), append one line to `memory.md` under `## Known gotchas`:
+```
+- [active] {gotcha, one sentence}. (added: {RUN_ID})
+```
+Skip this if nothing new was learned — don't pad the file.
 
 Tell the user:
 "✓ Pipeline complete! All tests passed.
 
 **Run:** {RUN_ID}
-**Cost breakdown:** (show the cost.md table)
+**Cost breakdown (est.):** (show the cost.md table)
 **Artifacts:**
 - PRD: `runs/{RUN_ID}/prd.md`
 - Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
