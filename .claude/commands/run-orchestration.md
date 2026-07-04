@@ -157,9 +157,50 @@ Continue to Stage 4.
 
 ---
 
-## STAGE 4 — Test-Reviewer Gate
+## STAGE 4 — Contract Gate + Test-Reviewer
 
 Update `runs/{RUN_ID}/state.md`: set `step: test-reviewer`, `status: running`.
+
+### Stage 4a — Mechanical contract check (runs first, no LLM, no cost)
+
+```bash
+bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"
+CONTRACT_EXIT=$?
+```
+
+**If `CONTRACT_EXIT` is non-zero (violations found):**
+
+Do **not** run the LLM Test-Reviewer — a mechanical violation is not a judgment call. Append the script's output (one violation per line) to `runs/{RUN_ID}/report.md` under:
+```
+[check-contract] FAIL — {N} violation(s), returning to Tester (retry {N}/2)
+
+{script output, verbatim}
+```
+
+Read `retry_count` from state.md.
+
+- If `retry_count >= 2` → Stop. Tell the user:
+  "Contract check retry cap reached (2/2). Human intervention required.
+  Review `runs/{RUN_ID}/report.md` for the violations, fix the tests manually or run:
+  `/resume-orchestration {RUN_ID} --from tester`"
+  Do not continue.
+
+- If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
+  "Mechanical contract check failed. Retrying Tester with violations as feedback (attempt {retry_count}/2)..."
+
+  Archive the current tests:
+  ```bash
+  cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}
+  ```
+
+  Re-run Stage 3 (Tester) injecting the violation list:
+  "The mechanical contract check failed with these violations: {VIOLATIONS}. Fix every one before writing the new tests — these are not style suggestions, they are exact name/path/package mismatches."
+
+  Then re-run Stage 4 from Stage 4a.
+
+**If `CONTRACT_EXIT` is 0 (clean):** continue to Stage 4b.
+
+### Stage 4b — LLM Test-Reviewer (judgment calls only: assertion quality, coverage)
 
 Read the file `.claude/commands/_test-reviewer-agent.md` in full.
 Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
@@ -195,9 +236,16 @@ Read `retry_count` from state.md.
   Re-run Stage 3 (Tester) injecting the reviewer feedback:
   "The previous test attempt was rejected by the test-reviewer with this feedback: {FEEDBACK}. Fix the issues listed before writing the new tests."
 
-  Then re-run Stage 4.
+  Then re-run Stage 4 from Stage 4a (the contract check must pass again against the rewritten tests).
 
-**If `status: running` (reviewer approved):** continue to Stage 5.
+**If `status: running` (reviewer approved):**
+
+Stamp the gate so the post-Coder check can detect any test file edited after this point:
+```bash
+touch "runs/{RUN_ID}/.test_reviewer_passed_at"
+```
+
+Continue to Stage 5.
 
 ---
 
@@ -224,7 +272,60 @@ Read `runs/{RUN_ID}/state.md`.
   See `runs/{RUN_ID}/report.md` for details."
   Do not continue.
 
-- If `status: running` → continue to Stage 6.
+- If `status: running` → continue to Stage 5b.
+
+---
+
+## STAGE 5b — Code Contract Gate
+
+Mechanical post-Coder check — catches a testid the Coder dropped, or tests that
+were edited after the reviewer already passed them, before spending a sandbox run.
+
+```bash
+bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}" --code
+CODE_CONTRACT_EXIT=$?
+```
+
+**If `CODE_CONTRACT_EXIT` is 0 (clean):** continue to Stage 6.
+
+**If violations include `TESTS_MODIFIED_AFTER_REVIEW`:**
+
+STOP immediately — this means a test file changed after the test-reviewer gate
+already approved it, which is exactly the run-1 defect this gate exists to catch.
+Update `runs/{RUN_ID}/state.md`: `status: failed`, `pause_reason: tests-modified-after-review`.
+Append the violation(s) to `runs/{RUN_ID}/report.md`. Tell the user:
+"Tests were modified after the test-reviewer approved them. This requires human review —
+run `/resume-orchestration {RUN_ID} --from tester` once you've decided how to proceed."
+Do not continue, and do not retry automatically.
+
+**If violations only include `MISSING_TESTID_IN_CODE` (no test-edit violation):**
+
+This is a Coder defect, not a test problem — route back to the Coder without
+spending a sandbox run. Append the violations to `runs/{RUN_ID}/report.md` under:
+```
+[check-contract --code] FAIL — {N} violation(s), returning to Coder (retry {N}/2)
+
+{script output, verbatim}
+```
+
+Read `retry_count` from state.md.
+
+- If `retry_count >= 2` → Stop. Tell the user:
+  "Code contract check retry cap reached (2/2). Human intervention required.
+  Review `runs/{RUN_ID}/report.md` for the violations, fix the code manually or run:
+  `/resume-orchestration {RUN_ID} --from coder`"
+  Do not continue.
+
+- If `retry_count < 2` → increment `retry_count`. Tell the user:
+  "Coder dropped a contract testid. Retrying Coder with the violation as feedback (attempt {retry_count}/2)..."
+
+  Archive current code:
+  ```bash
+  cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
+  ```
+
+  Re-run Stage 5 (Coder) with `--feedback "{VIOLATIONS}"` injected.
+  Then re-run Stage 5b.
 
 ---
 

@@ -20,19 +20,17 @@ Read all of the following:
 2. `runs/{RUN_ID}/plan.md` — the Interface Contract and acceptance criteria coverage table
 3. `runs/{RUN_ID}/prd.md` — the original acceptance criteria
 
+**Contract compliance was already verified by script before you ran.** `check-contract.sh`
+runs ahead of you in the pipeline and mechanically checks: import paths and `data-testid`
+values against the Interface Contract, package imports against the target repo's real
+`package.json` (dependencies + devDependencies), and banned patterns (`while(true)`,
+unmocked `fetch`/`axios`). You are not re-litigating those — if you're reading this, they
+already passed. Your checklist is judgment calls only: does each test actually verify the
+behavior it claims to, and is coverage complete.
+
 ## Your checklist
 
 Go through every item. Record your finding (PASS / FAIL / WARN) for each.
-
-### Checklist A — Contract compliance
-
-For each test file:
-
-- [ ] **A1.** Every import path matches the Interface Contract in `plan.md` exactly (character for character, including path aliases)
-- [ ] **A2.** Every `data-testid` string used in the tests appears verbatim in the Interface Contract
-- [ ] **A3.** Every component name, prop name, and export used matches the Interface Contract
-
-Failure mode: the Tester invented a name the Coder won't produce → **FAIL, route back to Tester**
 
 ### Checklist B — Test quality
 
@@ -42,8 +40,6 @@ For each individual test case:
 - [ ] **B2.** The test does not trivially pass regardless of implementation (e.g. `expect(true).toBe(true)`, asserting only that a component renders without crashing when the criterion is about computed output)
 - [ ] **B3.** The test does not assert a hardcoded magic value that the Coder could satisfy by returning a constant (e.g. criterion is "shows net balance = income - expenses" but the test only passes `income=100, expenses=0` and asserts `$100`)
   - Acceptable fix: use at least two different input combinations whose outputs differ
-- [ ] **B4.** No test contains `while(true)`, `setInterval` without cleanup, unresolved `Promise` chains, or `fetch`/`axios` calls without mocking
-- [ ] **B5.** No test imports from `node_modules` paths that don't exist in `repo-digest.md`'s dependency list
 
 ### Checklist C — Coverage
 
@@ -58,7 +54,7 @@ For each individual test case:
 
 After completing the checklist:
 
-**If any A or B items FAIL:**
+**If any B or C items FAIL:**
 
 Update `runs/{RUN_ID}/state.md`:
 - Set `step: tester`
@@ -73,13 +69,13 @@ Append to `runs/{RUN_ID}/report.md`:
 [test-reviewer] FAIL — returning to Tester (retry {N}/2)
 
 Failed items:
-- A2: test uses data-testid="budget-total" but contract specifies data-testid="budget-summary-total" (BudgetSummary.test.tsx line 14)
 - B3: criterion #2 only tested with income=100, expenses=0 — add a second input combination
+- C1: criterion #4 has no test case mapped to it
 ```
 
 Tell the user which items failed and what the Tester must fix. Then re-invoke the Tester with the feedback injected.
 
-**If all A, B, and C items PASS (D items are informational only):**
+**If all B and C items PASS (D items are informational only):**
 
 Update `runs/{RUN_ID}/state.md`:
 - Set `step: coder`
@@ -91,7 +87,8 @@ Update `runs/{RUN_ID}/state.md`:
 Append to `runs/{RUN_ID}/report.md`:
 ```
 [test-reviewer] PASS — {N} test cases reviewed.
-Checklist: A1✓ A2✓ A3✓ B1✓ B2✓ B3✓ B4✓ B5✓ C1✓ C2✓
+Contract compliance: verified by check-contract.sh before this review ran.
+Checklist: B1✓ B2✓ B3✓ C1✓ C2✓
 CONTRACT_GAPs: {N} (listed above if any)
 Proceeding to Coder.
 ```

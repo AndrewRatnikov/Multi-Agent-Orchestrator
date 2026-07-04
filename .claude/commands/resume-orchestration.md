@@ -91,15 +91,22 @@ Read `.claude/commands/_tester-agent.md` and execute with `--run {RUN_ID} --repo
 Then continue through test-reviewer → coder → sandbox → done.
 
 ### If RESUME_FROM = `test-reviewer`
-Read `.claude/commands/_test-reviewer-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
-Apply the same retry/stop logic as in `run-orchestration.md` Stage 4.
+Run Stage 4a first: `bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"`.
+Apply the same mechanical-gate logic as in `run-orchestration.md` Stage 4a (violations route
+back to Tester with the retry cap; never invoke the LLM reviewer on a dirty contract check).
+If clean, read `.claude/commands/_test-reviewer-agent.md` and execute with `--run {RUN_ID} --repo {REPO}` (Stage 4b).
+Apply the same retry/stop logic as in `run-orchestration.md` Stage 4b.
+On PASS, stamp `runs/{RUN_ID}/.test_reviewer_passed_at` before continuing.
 Then continue through coder → sandbox → done (if reviewer passes).
 
 ### If RESUME_FROM = `coder`
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
 Read `.claude/commands/_coder-agent.md` and execute with `--run {RUN_ID} --repo {REPO} --feedback "{LAST_FAIL_OUTPUT}"`.
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
-Then run sandbox → done (if tests pass).
+Then run Stage 5b (`check-contract.sh "{RUN_ID}" "{REPO}" --code`) exactly as in `run-orchestration.md` Stage 5b —
+a `TESTS_MODIFIED_AFTER_REVIEW` violation is a hard stop, a `MISSING_TESTID_IN_CODE` violation routes back to
+the Coder without spending a sandbox run.
+Then run sandbox → done (if clean and tests pass).
 
 ### If RESUME_FROM = `sandbox`
 Read the test command from `runs/{RUN_ID}/repo-digest.md` (`## Test command` section).
