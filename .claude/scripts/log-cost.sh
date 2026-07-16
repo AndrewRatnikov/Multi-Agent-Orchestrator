@@ -16,11 +16,9 @@
 # These figures are HEURISTIC ESTIMATES derived from artifact file sizes
 # (chars/4), not real token counts reported by the model. Every number in
 # cost.md is labeled "(est)" for exactly this reason — see also memory.md's
-# `est-cost:` field (not `cost:`).
+# `tokens:` field.
 #
-# Pricing used for the estimate (Claude Sonnet 4 — update if the model changes):
-#   Input:  $3.00  per 1M tokens
-#   Output: $15.00 per 1M tokens
+# No dollar pricing — this tracks token counts only.
 
 set -euo pipefail
 
@@ -37,50 +35,42 @@ TOKENS_FILE="$RUN_DIR/.token-log"
 
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-INPUT_PRICE_PER_M=3.00
-OUTPUT_PRICE_PER_M=15.00
-
 # ── Append this stage's raw estimate to the append-only log ──────────────────
 # (Single source of truth — cost.md below is always regenerated from this file,
 # never edited in place.)
 echo "$STAGE $INPUT_TOKENS $OUTPUT_TOKENS" >> "$TOKENS_FILE"
 
+STAGE_TOTAL=$(( INPUT_TOKENS + OUTPUT_TOKENS ))
+
 # ── Note in report.md (a log entry, not a table — no arithmetic to get wrong) ─
-STAGE_COST=$(awk -v i="$INPUT_TOKENS" -v o="$OUTPUT_TOKENS" -v ip="$INPUT_PRICE_PER_M" -v op="$OUTPUT_PRICE_PER_M" \
-  'BEGIN { printf "%.4f", (i*ip/1000000) + (o*op/1000000) }')
 {
   echo ""
-  echo "**[$STAGE cost (est) — $TIMESTAMP]** in: ${INPUT_TOKENS} tok (est) · out: ${OUTPUT_TOKENS} tok (est) · stage total (est): \$${STAGE_COST}"
+  echo "**[$STAGE tokens (est) — $TIMESTAMP]** in: ${INPUT_TOKENS} tok (est) · out: ${OUTPUT_TOKENS} tok (est) · stage total (est): ${STAGE_TOTAL} tok"
 } >> "$REPORT"
 
 # ── Regenerate cost.md wholesale from .token-log (single writer, idempotent) ──
 {
-  echo "# Cost Summary (heuristic estimate — see note below)"
+  echo "# Token Usage Summary (heuristic estimate — see note below)"
   echo ""
-  echo "| Stage | Input tok (est) | Input \$ (est) | Output tok (est) | Output \$ (est) | Stage total \$ (est) |"
-  echo "|-------|------------------|----------------|-------------------|------------------|-----------------------|"
-  awk -v ip="$INPUT_PRICE_PER_M" -v op="$OUTPUT_PRICE_PER_M" '
+  echo "| Stage | Input tok (est) | Output tok (est) | Stage total tok (est) |"
+  echo "|-------|------------------|-------------------|------------------------|"
+  awk '
     {
       ti += $2; to += $3;
-      ic = $2 * ip / 1000000;
-      oc = $3 * op / 1000000;
-      printf "| %s | %s | $%.4f | %s | $%.4f | $%.4f |\n", $1, $2, ic, $3, oc, (ic+oc);
+      printf "| %s | %s | %s | %s |\n", $1, $2, $3, ($2+$3);
     }
     END {
-      tic = ti * ip / 1000000;
-      toc = to * op / 1000000;
-      printf "| **TOTAL** | %s | $%.4f | %s | $%.4f | $%.4f |\n", ti, tic, to, toc, (tic+toc);
+      printf "| **TOTAL** | %s | %s | %s |\n", ti, to, (ti+to);
     }
   ' "$TOKENS_FILE"
   echo ""
   echo "> Estimated from artifact file sizes (chars/4). Excludes conversation"
-  echo "> context, agent reasoning, and retries — real spend is substantially"
-  echo "> higher. Use for RELATIVE stage comparison only, never as actual spend."
+  echo "> context, agent reasoning, and retries — real usage is substantially"
+  echo "> higher. Use for RELATIVE stage comparison only, never as an exact count."
 } > "$COST_FILE"
 
 # ── Console echo for interactive runs ─────────────────────────────────────────
-RUN_TOTAL_COST=$(awk -v ip="$INPUT_PRICE_PER_M" -v op="$OUTPUT_PRICE_PER_M" \
-  '{ s += ($2*ip/1000000) + ($3*op/1000000) } END { printf "%.4f", s+0 }' "$TOKENS_FILE")
+RUN_TOTAL_TOKENS=$(awk '{ s += $2 + $3 } END { print s+0 }' "$TOKENS_FILE")
 echo ""
-echo "  Stage (est): \$${STAGE_COST} | Run total so far (est): \$${RUN_TOTAL_COST}"
+echo "  Stage (est): ${STAGE_TOTAL} tok | Run total so far (est): ${RUN_TOTAL_TOKENS} tok"
 echo ""

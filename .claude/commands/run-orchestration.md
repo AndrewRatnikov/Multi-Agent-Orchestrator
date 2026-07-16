@@ -396,12 +396,12 @@ All tests passed. Pipeline complete.
 Finished: {TIMESTAMP}
 ```
 
-Read the cost summary from `runs/{RUN_ID}/cost.md` and display the full table to the user.
-Every figure in it is a heuristic estimate (chars/4), not real token usage — present it as such.
+Read the token usage summary from `runs/{RUN_ID}/cost.md` and display the full table to the user.
+Every figure in it is a heuristic estimate (chars/4) of token usage, not a count from the model — present it as such. No dollar figures — tokens only.
 
 Append a one-line entry to `memory.md` under `## Run history`:
 ```
-- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | est-cost: {TOTAL_FROM_COST_MD}
+- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | tokens: {TOTAL_FROM_COST_MD}
 ```
 
 If this run surfaced a gotcha worth remembering for future runs (a naming convention,
@@ -416,14 +416,14 @@ Tell the user:
 "✓ Pipeline complete! All tests passed.
 
 **Run:** {RUN_ID}
-**Cost breakdown (est.):** (show the cost.md table)
+**Token usage (est.):** (show the cost.md table)
 **Artifacts:**
 - PRD: `runs/{RUN_ID}/prd.md`
 - Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
 - Tests: `runs/{RUN_ID}/tests/`
 - Implementation: `runs/{RUN_ID}/code/`
 - Full report: `runs/{RUN_ID}/report.md`
-- Cost summary: `runs/{RUN_ID}/cost.md`
+- Token usage summary: `runs/{RUN_ID}/cost.md`
 
 To apply the implementation to your repo:
 \`\`\`bash

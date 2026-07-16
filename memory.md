@@ -44,7 +44,8 @@ Curator writes entries at the end of each successful run. Humans may edit direct
 
 <!-- Brief log of completed runs. Injected into: curator only -->
 <!-- Example entry:
-- run-001 | 2026-06-26 | task: Add BudgetSummary component | result: PASS | cost: $0.18
+- run-001 | 2026-06-26 | task: Add BudgetSummary component | result: PASS | tokens: 4200
 -->
 
-*(empty)*
+- run_20260627_113337 | 2026-06-27 | task: add possibility to delete current user | result: PASS
+- run_20260629_171846 | 2026-06-29 | task: add a Budget Summary card component (total income, expenses, net balance) | result: PASS
