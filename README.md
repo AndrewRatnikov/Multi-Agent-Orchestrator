@@ -19,15 +19,19 @@ Coder agent      → implementation files
 Test sandbox     → ground truth: exit code only
 ```
 
-Every stage writes its artifact to disk under `runs/{run_id}/` in this orchestrator
-project. On a PASS, the final stage also applies the result to the target repo itself:
-it checks out a new `orchestrator/{run_id}` branch there and commits the generated
-code and tests, so the change lands where the project actually lives — not just in
-this orchestrator's `runs/` folder. If the target repo has uncommitted changes at
-that point, the auto-apply is skipped (nothing is touched) and you're given the
-manual copy command instead.
+Before any of that runs, the target repo must be clean — the pipeline immediately
+checks out a new `orchestrator/{run_id}` branch there and works on it directly for
+the rest of the run. Planning docs (`prd.md`, `plan.md`) stay in this orchestrator
+project's `runs/{run_id}/`, but tests and code land as real commits in the target
+repo as they're produced: one commit for the tests (written before any
+implementation), then one commit per file from the plan's Files-changed table as the
+Coder implements it. A retry doesn't rewrite history — it adds a `fix:` commit on
+top. By the time a run finishes, the change is already fully committed on
+`orchestrator/{run_id}`; there's nothing left to copy or apply. Your previous branch
+is never touched.
 
-A failed stage stops the run and writes a report. You can resume from any step:
+A failed stage stops the run and writes a report, and whatever was committed so far
+stays right there on the branch for you to inspect. You can resume from any step:
 
 ```
 /resume-orchestration run_20260626_143022 --from coder

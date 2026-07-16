@@ -34,10 +34,40 @@ echo "$ORCHESTRATOR_ROOT"
 
 ## STAGE 0 — Setup
 
+### Claim a branch in {REPO}
+
+Every commit this pipeline makes from here on lands directly in {REPO}, one commit
+per plan step, as the work happens — not copied in at the end. That means {REPO}
+must be clean before anything starts.
+
+```bash
+cd "{REPO}"
+DIRTY=$(git status --porcelain)
+```
+
+**If `$DIRTY` is non-empty:** STOP. Tell the user:
+"{REPO} has uncommitted changes. This pipeline commits directly to a new branch in
+your repo as it works, so it needs a clean tree to start from. Commit or stash your
+changes, then re-run."
+Do not create a run folder. Do not proceed any further.
+
+**If clean:**
+```bash
+RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
+ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+BRANCH="orchestrator/$RUN_ID"
+git checkout -B "$BRANCH"
+cd "$ORCHESTRATOR_ROOT"
+echo "$RUN_ID / $BRANCH (from $ORIGINAL_BRANCH)"
+```
+
+{REPO} is now checked out on `{BRANCH}` and stays checked out on it for the rest of
+the run — every later stage commits into it directly, in place. Nothing is ever
+force-pushed or rewritten upstream, and `{ORIGINAL_BRANCH}` is never touched.
+
 ### Create run folder
 
 ```bash
-RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$ORCHESTRATOR_ROOT/runs/$RUN_ID/archive"
 echo "$RUN_ID"
 ```
@@ -50,6 +80,8 @@ Write `runs/{RUN_ID}/state.md`:
 run_id: {RUN_ID}
 task: {TASK}
 repo: {REPO}
+original_branch: {ORIGINAL_BRANCH}
+target_branch: {BRANCH}
 step: init
 status: running
 timestamp: {TIMESTAMP}
@@ -67,6 +99,7 @@ Write `runs/{RUN_ID}/report.md`:
 
 **Task:** {TASK}
 **Repo:** {REPO}
+**Branch:** {BRANCH} (from {ORIGINAL_BRANCH})
 **Started:** {TIMESTAMP}
 
 ---
@@ -82,7 +115,7 @@ bash .claude/scripts/repo-digest.sh "{REPO}" "{RUN_ID}" "{TASK}"
 
 If the digest warns it is large (>2000 tokens), trim the file list section before continuing.
 
-Tell the user: "Run `{RUN_ID}` started. Repo digest ready. Starting pipeline..."
+Tell the user: "Run `{RUN_ID}` started on branch `{BRANCH}` in {REPO}. Repo digest ready. Starting pipeline..."
 
 ---
 
@@ -146,6 +179,33 @@ Update `runs/{RUN_ID}/state.md`: set `step: tester`, `status: running`, `retry_c
 Read the file `.claude/commands/_tester-agent.md` in full.
 Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
 
+### Commit the tests to {REPO}
+
+Tests are the first thing that lands in the target repo — written and committed
+before any implementation exists, directly on `{BRANCH}`:
+
+```bash
+cp -r "runs/{RUN_ID}/tests/." "{REPO}/"
+cd "{REPO}"
+git add -A
+```
+
+If nothing is staged (`git diff --cached --quiet` exits 0 — only happens if a
+retry produced byte-identical tests), skip the commit. Otherwise, read `retry_count`
+from `runs/{RUN_ID}/state.md`: `0` means this is the first attempt, `>0` means a
+fix pass triggered by Stage 4a/4b below.
+
+```bash
+git commit -m "{MSG}
+
+Run: {RUN_ID}"
+cd "$ORCHESTRATOR_ROOT"
+```
+
+Where `{MSG}` is:
+- `retry_count` is `0`: `test: {TASK}` (plus a short body: "Written test-first, before any implementation. Not yet reviewed — subject to the mechanical contract gate and the test-reviewer.")
+- `retry_count` is `>0`: `fix tests: {TASK} (retry {retry_count}/2)`
+
 After the Tester agent finishes, **log cost**:
 ```bash
 # Estimate: input = agent prompt + plan.md; output = all test files combined
@@ -183,7 +243,8 @@ Read `retry_count` from state.md.
 - If `retry_count >= 2` → Stop. Tell the user:
   "Contract check retry cap reached (2/2). Human intervention required.
   Review `runs/{RUN_ID}/report.md` for the violations, fix the tests manually or run:
-  `/resume-orchestration {RUN_ID} --from tester`"
+  `/resume-orchestration {RUN_ID} --from tester`
+  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
   Do not continue.
 
 - If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
@@ -222,7 +283,8 @@ Read `retry_count` from state.md.
 - If `retry_count >= 2` → Stop. Tell the user:
   "Test-reviewer retry cap reached (2/2). Human intervention required.
   Review `runs/{RUN_ID}/report.md` for the feedback, fix the tests manually or run:
-  `/resume-orchestration {RUN_ID} --from tester`"
+  `/resume-orchestration {RUN_ID} --from tester`
+  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
   Do not continue.
 
 - If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
@@ -258,6 +320,36 @@ Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_co
 Read the file `.claude/commands/_coder-agent.md` in full.
 Execute those instructions now with arguments: `--run {RUN_ID} --repo {REPO}`
 
+### Commit each implemented file to {REPO}
+
+Read `retry_count` from `runs/{RUN_ID}/state.md` once — `0` means first pass, `>0`
+means this is a fix pass triggered by Stage 5b or Stage 6 below, for every file below.
+
+Read the `## Files changed` table in `runs/{RUN_ID}/plan.md`. Work through it top to
+bottom. For each row (`{file}`, `{action}`, `{purpose}`):
+
+```bash
+mkdir -p "{REPO}/$(dirname '{file}')"
+cp "runs/{RUN_ID}/code/{file}" "{REPO}/{file}"
+cd "{REPO}"
+git add "{file}"
+```
+
+If nothing is staged for `{file}` (`git diff --cached --quiet -- "{file}"` exits 0),
+it's unchanged from what's already committed — skip it, no commit. Otherwise
+commit it on its own, right now, before moving to the next row:
+
+- `retry_count` is `0`: `git commit -m "{VERB}: {file}\n\n{purpose}\n\nRun: {RUN_ID}"` — `{VERB}` is `create` if the table's Action column says CREATE, `modify` if MODIFY.
+- `retry_count` is `>0`: `git commit -m "fix: {file} — address feedback (retry {retry_count}/2)\n\nRun: {RUN_ID}"`
+
+```bash
+cd "$ORCHESTRATOR_ROOT"
+```
+
+One commit per changed file, in table order — the plan's Files-changed table becomes
+the commit history on `{BRANCH}` directly. Never batch multiple files into one
+commit, and never commit a file with no staged diff.
+
 After the Coder agent finishes, **log cost**:
 ```bash
 # Estimate: input = agent prompt + plan.md + all tests + repo-digest.md; output = all code files
@@ -271,7 +363,8 @@ Read `runs/{RUN_ID}/state.md`.
 - If `status: paused` and `pause_reason: contract-mismatch` → Stop. Tell the user:
   "Pipeline paused: CONTRACT_MISMATCH detected. The Interface Contract needs correction.
   Run: `/resume-orchestration {RUN_ID} --from architect`
-  See `runs/{RUN_ID}/report.md` for details."
+  See `runs/{RUN_ID}/report.md` for details.
+  Whatever was already committed this pass is on `{BRANCH}` in {REPO}."
   Do not continue.
 
 - If `status: running` → continue to Stage 5b.
@@ -297,7 +390,8 @@ already approved it, which is exactly the run-1 defect this gate exists to catch
 Update `runs/{RUN_ID}/state.md`: `status: failed`, `pause_reason: tests-modified-after-review`.
 Append the violation(s) to `runs/{RUN_ID}/report.md`. Tell the user:
 "Tests were modified after the test-reviewer approved them. This requires human review —
-run `/resume-orchestration {RUN_ID} --from tester` once you've decided how to proceed."
+run `/resume-orchestration {RUN_ID} --from tester` once you've decided how to proceed.
+Whatever was already committed this pass is on `{BRANCH}` in {REPO}."
 Do not continue, and do not retry automatically.
 
 **If violations only include `MISSING_TESTID_IN_CODE` (no test-edit violation):**
@@ -315,7 +409,8 @@ Read `retry_count` from state.md.
 - If `retry_count >= 2` → Stop. Tell the user:
   "Code contract check retry cap reached (2/2). Human intervention required.
   Review `runs/{RUN_ID}/report.md` for the violations, fix the code manually or run:
-  `/resume-orchestration {RUN_ID} --from coder`"
+  `/resume-orchestration {RUN_ID} --from coder`
+  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
   Do not continue.
 
 - If `retry_count < 2` → increment `retry_count`. Tell the user:
@@ -357,7 +452,8 @@ Read `retry_count` from state.md.
 - If `retry_count >= 2` → Stop. Tell the user:
   "Coder retry cap reached (2/2). Human intervention required.
   Review `runs/{RUN_ID}/report.md` for the test failure output, then run:
-  `/resume-orchestration {RUN_ID} --from coder`"
+  `/resume-orchestration {RUN_ID} --from coder`
+  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
   Do not continue.
 
 - If `retry_count < 2` → increment `retry_count`. Tell the user:
@@ -374,7 +470,9 @@ Read `retry_count` from state.md.
 
 **If exit code 3 or any other unlisted code (ERROR):**
 STOP immediately. Update state.md: status: failed, pause_reason: sandbox-infrastructure-error.
-Tell the user the sandbox environment is broken and show the report entry.
+Tell the user the sandbox environment is broken and show the report entry. Mention
+that whatever was already committed is on `{BRANCH}` in {REPO}, untouched by this
+failure — only the disposable sandbox worktree is affected.
 You must NOT manually replicate the sandbox, run tests yourself, or declare
 PASS/FAIL by any other means. The sandbox exit code is the only accepted verdict.
 
@@ -396,52 +494,22 @@ All tests passed. Pipeline complete.
 Finished: {TIMESTAMP}
 ```
 
-### Stage 7a — Apply the result to the target repo
-
-The whole point of a run is code that lives in {REPO}, not just in this orchestrator
-project's `runs/` folder. Apply it automatically, on its own branch, so the user's
-current work in {REPO} is never touched directly.
+Every test and code change has already been committed to `{BRANCH}` in {REPO} as the
+pipeline worked, one commit per step — there is nothing left to copy or apply.
+Collect the commit log for the report:
 
 ```bash
 cd "{REPO}"
-ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-DIRTY=$(git status --porcelain)
-```
-
-**If `$DIRTY` is non-empty** ({REPO} has uncommitted changes — do not touch the working tree):
-
-Append to `runs/{RUN_ID}/report.md`:
-```
-### Apply-to-repo: SKIPPED — {REPO} has uncommitted changes
-Manual apply required:
-  cp -r runs/{RUN_ID}/code/. {REPO}/
-  cp -r runs/{RUN_ID}/tests/. {REPO}/
-```
-Set `APPLIED=false` and skip to the final summary below.
-
-**If `$DIRTY` is empty (clean):**
-
-```bash
-BRANCH="orchestrator/{RUN_ID}"
-git checkout -B "$BRANCH"
-cp -r "$ORCHESTRATOR_ROOT/runs/{RUN_ID}/code/." "{REPO}/"
-cp -r "$ORCHESTRATOR_ROOT/runs/{RUN_ID}/tests/." "{REPO}/"
-git add -A
-git commit -m "{TASK}
-
-Generated by AI Orchestrator run {RUN_ID}.
-Full report: $ORCHESTRATOR_ROOT/runs/{RUN_ID}/report.md"
-COMMIT_SHA=$(git rev-parse --short HEAD)
+COMMIT_LOG=$(git log --oneline "{ORIGINAL_BRANCH}..{BRANCH}")
+COMMIT_COUNT=$(git rev-list --count "{ORIGINAL_BRANCH}..{BRANCH}")
+cd "$ORCHESTRATOR_ROOT"
 ```
 
 Append to `runs/{RUN_ID}/report.md`:
 ```
-### Applied to repo
-- Branch: {BRANCH} (branched from {ORIGINAL_BRANCH})
-- Commit: {COMMIT_SHA}
-- {REPO} is now checked out on {BRANCH} with the change committed.
+### Commits on {BRANCH} ({COMMIT_COUNT} ahead of {ORIGINAL_BRANCH})
+{COMMIT_LOG}
 ```
-Set `APPLIED=true`.
 
 ---
 
@@ -465,24 +533,17 @@ Tell the user:
 "✓ Pipeline complete! All tests passed.
 
 **Run:** {RUN_ID}
+**Branch:** `{BRANCH}` in {REPO} — {COMMIT_COUNT} commit(s) ahead of `{ORIGINAL_BRANCH}`:
+{COMMIT_LOG}
+
+Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime with
+`git checkout {ORIGINAL_BRANCH}`. Everything the pipeline did is already committed on
+`{BRANCH}`; nothing further needs to be applied.
+
 **Token usage (est.):** (show the cost.md table)
-
-If `APPLIED=true`:
-**Applied to:** {REPO} on branch `{BRANCH}` (commit {COMMIT_SHA})
-Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime with `git checkout {ORIGINAL_BRANCH}`.
-
-If `APPLIED=false`:
-**Not applied automatically** — {REPO} had uncommitted changes, so nothing was touched there.
-Apply manually once you've committed or stashed your work:
-\`\`\`bash
-cp -r runs/{RUN_ID}/code/. {REPO}/
-cp -r runs/{RUN_ID}/tests/. {REPO}/
-\`\`\`
 
 **Orchestrator-side artifacts (for reference/audit):**
 - PRD: `runs/{RUN_ID}/prd.md`
 - Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
-- Tests: `runs/{RUN_ID}/tests/`
-- Implementation: `runs/{RUN_ID}/code/`
 - Full report: `runs/{RUN_ID}/report.md`
 - Token usage summary: `runs/{RUN_ID}/cost.md`"

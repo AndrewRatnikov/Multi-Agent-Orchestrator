@@ -26,6 +26,7 @@ Read `runs/{RUN_ID}/state.md` and display it clearly:
 Run:     {run_id}
 Task:    {task}
 Repo:    {repo}
+Branch:  {target_branch} (from {original_branch})
 Step:    {step}
 Status:  {status}
 Paused:  {pause_reason}
@@ -37,6 +38,8 @@ Also show the last 20 lines of `runs/{RUN_ID}/report.md` so the user sees the mo
 Set:
 - `REPO` = the `repo` field from state.md (resolve to absolute path)
 - `TASK` = the `task` field from state.md
+- `BRANCH` = the `target_branch` field from state.md
+- `ORIGINAL_BRANCH` = the `original_branch` field from state.md
 - `RESUME_FROM` = `--from` value if provided, otherwise the `step` field from state.md
 
 ---
@@ -72,6 +75,33 @@ Append to `runs/{RUN_ID}/report.md`:
 
 ---
 
+## Step 3b — Make sure {REPO} is on {BRANCH}
+
+Every commit this pipeline makes lands directly in {REPO} on `{BRANCH}`, so before
+resuming any work, put the repo back in that state:
+
+```bash
+cd "{REPO}"
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+DIRTY=$(git status --porcelain)
+```
+
+**If `$DIRTY` is non-empty:** STOP. Tell the user:
+"{REPO} has uncommitted changes on `$CURRENT_BRANCH`. This pipeline commits directly
+to `{BRANCH}` as it works, so it needs a clean tree before resuming. Commit or stash
+your changes, then resume again."
+Do not proceed.
+
+**If clean and `$CURRENT_BRANCH` is not `{BRANCH}`:**
+```bash
+git checkout "{BRANCH}"
+cd "$ORCHESTRATOR_ROOT"
+```
+
+**If clean and already on `{BRANCH}`:** nothing to do, continue.
+
+---
+
 ## Step 4 — Execute from RESUME_FROM
 
 Execute the stages in order starting from RESUME_FROM. For each stage, follow the same logic as `run-orchestration.md` — including the retry_count exceptions: never reset `retry_count` when re-entering a stage as a retry. All prior artifacts (prd.md, plan.md, repo-digest.md, tests/) are already on disk — read them directly rather than regenerating.
@@ -88,6 +118,9 @@ Then continue through tester → test-reviewer → coder → sandbox → done.
 
 ### If RESUME_FROM = `tester`
 Read `.claude/commands/_tester-agent.md` and execute with `--run {RUN_ID} --repo {REPO}`.
+Then commit the tests to {REPO} exactly as in `run-orchestration.md` Stage 3's
+"Commit the tests to {REPO}" sub-step (reads `retry_count` from state.md to decide
+between a `test:` or `fix tests:` commit message).
 Then continue through test-reviewer → coder → sandbox → done.
 
 ### If RESUME_FROM = `test-reviewer`
@@ -102,10 +135,14 @@ Then continue through coder → sandbox → done (if reviewer passes).
 ### If RESUME_FROM = `coder`
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
 Read `.claude/commands/_coder-agent.md` and execute with `--run {RUN_ID} --repo {REPO} --feedback "{LAST_FAIL_OUTPUT}"`.
+Then commit each changed file to {REPO} exactly as in `run-orchestration.md` Stage 5's
+"Commit each implemented file to {REPO}" sub-step (one commit per row in the plan's
+Files-changed table that actually changed; `retry_count > 0` here, so every commit is
+a `fix:` commit).
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
 Then run Stage 5b (`check-contract.sh "{RUN_ID}" "{REPO}" --code`) exactly as in `run-orchestration.md` Stage 5b —
 a `TESTS_MODIFIED_AFTER_REVIEW` violation is a hard stop, a `MISSING_TESTID_IN_CODE` violation routes back to
-the Coder without spending a sandbox run.
+the Coder (write the fix, commit it, re-check) without spending a sandbox run.
 Then run sandbox → done (if clean and tests pass).
 
 ### If RESUME_FROM = `sandbox`
@@ -127,7 +164,8 @@ Stop.
 
 ## Completion
 
-When the pipeline completes (all tests pass), follow the same Stage 7 logic as `run-orchestration.md`:
-update state.md to done, append to report.md, run Stage 7a to apply the result onto a new
-`orchestrator/{RUN_ID}` branch in {REPO} (skipping if {REPO} has uncommitted changes),
-add a run history entry to memory.md, and tell the user.
+When the pipeline completes (all tests pass), follow the same Stage 7 logic as
+`run-orchestration.md`: update state.md to done, append to report.md, collect and
+report the `{ORIGINAL_BRANCH}..{BRANCH}` commit log (everything was already committed
+to {REPO} incrementally as each stage ran — there is nothing left to apply), add a
+run history entry to memory.md, and tell the user.
