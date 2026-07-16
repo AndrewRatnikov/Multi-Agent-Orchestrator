@@ -19,7 +19,15 @@ Coder agent      → implementation files
 Test sandbox     → ground truth: exit code only
 ```
 
-Every stage writes its artifact to disk. A failed stage stops the run and writes a report. You can resume from any step:
+Every stage writes its artifact to disk under `runs/{run_id}/` in this orchestrator
+project. On a PASS, the final stage also applies the result to the target repo itself:
+it checks out a new `orchestrator/{run_id}` branch there and commits the generated
+code and tests, so the change lands where the project actually lives — not just in
+this orchestrator's `runs/` folder. If the target repo has uncommitted changes at
+that point, the auto-apply is skipped (nothing is touched) and you're given the
+manual copy command instead.
+
+A failed stage stops the run and writes a report. You can resume from any step:
 
 ```
 /resume-orchestration run_20260626_143022 --from coder

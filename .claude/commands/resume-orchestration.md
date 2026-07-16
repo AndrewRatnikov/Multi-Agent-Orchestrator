@@ -128,4 +128,6 @@ Stop.
 ## Completion
 
 When the pipeline completes (all tests pass), follow the same Stage 7 logic as `run-orchestration.md`:
-update state.md to done, append to report.md, add a run history entry to memory.md, and tell the user.
+update state.md to done, append to report.md, run Stage 7a to apply the result onto a new
+`orchestrator/{RUN_ID}` branch in {REPO} (skipping if {REPO} has uncommitted changes),
+add a run history entry to memory.md, and tell the user.
