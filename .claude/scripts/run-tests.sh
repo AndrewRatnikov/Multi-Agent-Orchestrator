@@ -128,8 +128,17 @@ cp -r "$RUN_DIR/tests/." "$SANDBOX/"
 # ── Step 4: Install dependencies if node_modules is missing ───────────────────
 if [ ! -d "$SANDBOX/node_modules" ] && [ -f "$SANDBOX/package.json" ]; then
   echo "Installing dependencies (node_modules not present in worktree)..."
-  npm install --prefix "$SANDBOX" --silent 2>&1 | tail -5 \
-    || { echo "ERROR: npm install failed."; log_report "**ERROR:** npm install failed in sandbox."; exit 3; }
+  # Playwright (if present as a devDependency) downloads browser binaries on
+  # install by default — irrelevant to most test runs and slow/network-heavy
+  # in a disposable sandbox, so skip it.
+  export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+  if [ -f "$SANDBOX/pnpm-workspace.yaml" ] || [ -f "$SANDBOX/pnpm-lock.yaml" ]; then
+    (cd "$SANDBOX" && pnpm install --silent) \
+      || { echo "ERROR: pnpm install failed."; log_report "**ERROR:** pnpm install failed in sandbox."; exit 3; }
+  else
+    npm install --prefix "$SANDBOX" --silent 2>&1 | tail -5 \
+      || { echo "ERROR: npm install failed."; log_report "**ERROR:** npm install failed in sandbox."; exit 3; }
+  fi
   echo "Dependencies installed."
 fi
 

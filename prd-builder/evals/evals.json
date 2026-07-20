@@ -1,0 +1,41 @@
+{
+  "skill_name": "prd-builder",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to write a PRD for letting users export their data to CSV from our app.",
+      "expected_output": "A vague, one-line request. The skill should NOT jump straight to drafting a full PRD from assumptions. Instead it should start the interview: ask a small, focused set of questions about the first section (problem & context) rather than dumping all 7 sections' worth of questions at once, and clearly hold off on writing the PRD file until it has real answers.",
+      "files": [],
+      "expectations": [
+        "Does not write a full PRD markdown file in this first response",
+        "Asks clarifying questions rather than drafting from assumptions",
+        "Questions are scoped to one section at a time, not all sections dumped at once",
+        "Number of questions asked is small and focused (roughly 2-4)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Can you help me spec out a feature? We're adding an in-app notification digest — right now users get pinged individually for every comment, mention, and status change, and power users on big teams are muting notifications entirely because of the noise. The idea is to batch these into a single daily or weekly digest email/in-app card instead. Main users are people on teams with 10+ members. I honestly don't know yet how we'd measure whether this actually worked, and I haven't thought about timeline at all.",
+      "expected_output": "A detailed brain-dump that already answers problem/context, target users, and roughly the use case. The skill should recognize this, briefly confirm/reflect what was already given instead of re-asking it, and focus its questions on the genuine gaps the user flagged themselves (success metrics, timeline/scope) plus anything else needed (goals/non-goals, functional requirements, risks) rather than re-asking things already covered.",
+      "files": [],
+      "expectations": [
+        "Does not re-ask information the user already provided",
+        "Explicitly reflects back what was already given rather than silently absorbing it",
+        "Asks about the specific gaps the user flagged themselves (success metrics and timeline)",
+        "Does not write a full PRD file in this first response"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I need a PRD fast for an internal admin tool that lets our support team manually refund an order with one click instead of going through Stripe's dashboard. I don't have time for a long back-and-forth right now — just make reasonable assumptions where you need to and write the draft, I'll correct anything that's off.",
+      "expected_output": "The user explicitly asked to skip the interview and get a draft with assumptions. The skill should respect this, asking at most a couple of essential clarifying questions (or none), then produce a PRD file where every assumption it made is clearly labeled as an assumption (not stated as fact), especially in areas like success metrics, scope, and risks where the user gave little detail.",
+      "files": [],
+      "expectations": [
+        "Respects the user's request to skip the interview (at most 1-2 questions)",
+        "Actually produces a PRD markdown file in this same turn",
+        "Assumptions made are explicitly labeled as assumptions",
+        "The PRD file follows the standard section structure"
+      ]
+    }
+  ]
+}

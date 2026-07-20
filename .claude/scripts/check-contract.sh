@@ -107,11 +107,61 @@ fi
 # Read the repo's package.json directly — repo-digest.md strips devDependencies,
 # which is exactly why the @testing-library/jest-dom regression slipped past
 # the LLM gate in run 1.
+#
+# Monorepo-aware: a pnpm/npm/yarn workspace declares real dependencies in each
+# workspace member's own package.json (e.g. apps/api/package.json), not just the
+# root one — checking only the root produces false UNKNOWN_PACKAGE violations for
+# every backend-only dependency in a workspace repo. When pnpm-workspace.yaml is
+# present, aggregate dependencies across the root plus every package.json matched
+# by its `packages:` glob entries (only simple `dir/*` entries are expanded; exact
+# paths are used as-is).
 if [ -f "$REPO_PATH/package.json" ]; then
   node -e "
-    const p = require('$REPO_PATH/package.json');
-    const deps = Object.assign({}, p.dependencies||{}, p.devDependencies||{}, p.peerDependencies||{});
-    console.log(Object.keys(deps).join('\n'));
+    const fs = require('fs');
+    const path = require('path');
+    const repoPath = '$REPO_PATH';
+
+    function depsOf(pkgJsonPath) {
+      try {
+        const p = require(pkgJsonPath);
+        return Object.assign({}, p.dependencies||{}, p.devDependencies||{}, p.peerDependencies||{});
+      } catch (e) {
+        return {};
+      }
+    }
+
+    let allDeps = depsOf(path.join(repoPath, 'package.json'));
+
+    const workspaceFile = path.join(repoPath, 'pnpm-workspace.yaml');
+    if (fs.existsSync(workspaceFile)) {
+      const lines = fs.readFileSync(workspaceFile, 'utf-8').split('\n');
+      let inPackages = false;
+      const patterns = [];
+      for (const line of lines) {
+        if (/^packages:/.test(line)) { inPackages = true; continue; }
+        if (inPackages) {
+          const m = line.match(/^\s*-\s*['\"]?([^'\"#]+)['\"]?\s*$/);
+          if (m) { patterns.push(m[1].trim()); continue; }
+          if (/^\S/.test(line)) inPackages = false; // dedented out of the packages: block
+        }
+      }
+      for (const pattern of patterns) {
+        if (pattern.endsWith('/*')) {
+          const dir = path.join(repoPath, pattern.slice(0, -2));
+          if (fs.existsSync(dir)) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (entry.isDirectory()) {
+                allDeps = Object.assign(allDeps, depsOf(path.join(dir, entry.name, 'package.json')));
+              }
+            }
+          }
+        } else {
+          allDeps = Object.assign(allDeps, depsOf(path.join(repoPath, pattern, 'package.json')));
+        }
+      }
+    }
+
+    console.log(Object.keys(allDeps).join('\n'));
   " > "$TMP/known_packages" 2>/dev/null || touch "$TMP/known_packages"
 
   # Bare-specifier imports: not starting with '.' (relative) and not the '@/' path alias.
@@ -123,6 +173,13 @@ if [ -f "$REPO_PATH/package.json" ]; then
 
   while IFS= read -r spec; do
     [ -z "$spec" ] && continue
+    # Node.js builtins (with or without the 'node:' prefix) are always available
+    # and never appear in package.json — skip them rather than flag a false positive.
+    bare="${spec#node:}"
+    case "$bare" in
+      assert|assert/strict|async_hooks|buffer|child_process|cluster|console|constants|crypto|dgram|diagnostics_channel|dns|dns/promises|domain|events|fs|fs/promises|http|http2|https|inspector|inspector/promises|module|net|os|path|path/posix|path/win32|perf_hooks|process|punycode|querystring|readline|readline/promises|repl|stream|string_decoder|sys|timers|timers/promises|tls|trace_events|tty|url|util|util/types|v8|vm|wasi|worker_threads|zlib)
+        continue ;;
+    esac
     if [[ "$spec" == @*/* ]]; then
       pkg="$(echo "$spec" | cut -d/ -f1-2)"
     else
@@ -153,38 +210,53 @@ if [ -f "$REPO_PATH/tsconfig.json" ]; then
 fi
 
 if [ -s "$TMP/contract_files" ]; then
-  # Note: '../'-prefixed imports are skipped — they can't be resolved without
-  # knowing each test file's location in the target tree. False negative is
-  # acceptable by design (the sandbox will fail on a genuinely bad path anyway).
-  grep -rhoE "^[[:space:]]*import[^;]*['\"][^'\"]+['\"]" "$TESTS_DIR" 2>/dev/null \
-    | grep -oE "['\"][^'\"]+['\"]\$" | tr -d "'\"" \
-    | grep -E '^(\./|@/)' | sort -u > "$TMP/code_imports"
+  # Process file-by-file so relative ('./', '../') imports resolve against each
+  # test file's OWN directory, not naively against the repo root. TESTS_DIR mirrors
+  # the target repo's real directory structure (e.g.
+  # tests/apps/api/src/sets/sets.controller.spec.ts), so a test file's path relative
+  # to TESTS_DIR is exactly its future repo-relative directory — joining a relative
+  # import against that directory (not against $REPO_PATH directly) is what makes
+  # the existing-file fallback below actually correct for nested test files that
+  # import untouched sibling files (e.g. a Day-2 test importing a Day-1 DTO that
+  # isn't itself part of this run's Interface Contract).
+  : > "$TMP/violations_check3"
+  while IFS= read -r -d '' testfile; do
+    rel_dir="$(dirname "${testfile#"$TESTS_DIR"/}")"
 
-  while IFS= read -r imp; do
-    [ -z "$imp" ] && continue
-    resolved="$imp"
-    if [[ "$imp" == @/* ]]; then
-      resolved="${ALIAS_TARGET}/${imp#@/}"
-    fi
-    resolved="${resolved%.ts}"; resolved="${resolved%.tsx}"; resolved="${resolved%.js}"; resolved="${resolved%.jsx}"
-    resolved="${resolved#./}"
-    # An import is legitimate if it matches a contract File: path OR already
-    # exists in the target repo (tests may import existing helpers/types/utils
-    # that are correctly absent from the contract — only NEW names must come
-    # from the contract).
-    if grep -qF "$resolved" "$TMP/contract_files"; then
-      continue
-    fi
-    exists_in_repo=0
-    for ext in ts tsx js jsx; do
-      if [ -f "$REPO_PATH/$resolved.$ext" ]; then exists_in_repo=1; break; fi
-    done
-    if [ "$exists_in_repo" -eq 1 ] || [ -d "$REPO_PATH/$resolved" ] \
-       || [ -f "$REPO_PATH/$resolved/index.ts" ] || [ -f "$REPO_PATH/$resolved/index.tsx" ]; then
-      continue
-    fi
-    add_violation "IMPORT_NOT_IN_CONTRACT: test imports '$imp' (resolved: $resolved) which matches neither an Interface Contract File: path nor an existing file in the target repo"
-  done < "$TMP/code_imports"
+    grep -hoE "^[[:space:]]*import[^;]*['\"][^'\"]+['\"]" "$testfile" 2>/dev/null \
+      | grep -oE "['\"][^'\"]+['\"]\$" | tr -d "'\"" \
+      | grep -E '^(\./|\.\./|@/)' | sort -u | while IFS= read -r imp; do
+        [ -z "$imp" ] && continue
+        if [[ "$imp" == @/* ]]; then
+          resolved="${ALIAS_TARGET}/${imp#@/}"
+        else
+          resolved=$(node -e "console.log(require('path').normalize(require('path').join('$rel_dir', '$imp')))" 2>/dev/null)
+          [ -z "$resolved" ] && resolved="$imp"
+        fi
+        resolved="${resolved%.ts}"; resolved="${resolved%.tsx}"; resolved="${resolved%.js}"; resolved="${resolved%.jsx}"
+        resolved="${resolved#./}"
+        # An import is legitimate if it matches a contract File: path OR already
+        # exists in the target repo (tests may import existing helpers/types/utils
+        # that are correctly absent from the contract — only NEW names must come
+        # from the contract).
+        if grep -qF "$resolved" "$TMP/contract_files"; then
+          continue
+        fi
+        exists_in_repo=0
+        for ext in ts tsx js jsx; do
+          if [ -f "$REPO_PATH/$resolved.$ext" ]; then exists_in_repo=1; break; fi
+        done
+        if [ "$exists_in_repo" -eq 1 ] || [ -d "$REPO_PATH/$resolved" ] \
+           || [ -f "$REPO_PATH/$resolved/index.ts" ] || [ -f "$REPO_PATH/$resolved/index.tsx" ]; then
+          continue
+        fi
+        echo "IMPORT_NOT_IN_CONTRACT: test imports '$imp' (resolved: $resolved) which matches neither an Interface Contract File: path nor an existing file in the target repo" >> "$TMP/violations_check3"
+      done
+  done < <(find "$TESTS_DIR" -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print0)
+
+  if [ -s "$TMP/violations_check3" ]; then
+    while IFS= read -r v; do add_violation "$v"; done < "$TMP/violations_check3"
+  fi
 fi
 
 # ── Check 4: banned patterns ─────────────────────────────────────────────────
