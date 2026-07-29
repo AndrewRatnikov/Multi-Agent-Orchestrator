@@ -195,18 +195,82 @@ fi
 grep -ohE '\*\*File:\*\*[[:space:]]*`[^`]+`' "$PLAN" 2>/dev/null \
   | sed -E 's/.*`([^`]+)`.*/\1/' | sed -E 's/\.[jt]sx?$//' | sort -u > "$TMP/contract_files"
 
-# Resolve the @/ alias from the target repo's tsconfig.json if present (default: @/ -> src/).
-ALIAS_TARGET="src"
-if [ -f "$REPO_PATH/tsconfig.json" ]; then
-  RESOLVED=$(node -e "
+# Resolve the @/ alias from tsconfig.json (default: @/ -> src/). Monorepo-aware, same
+# class of fix as Check 2's package.json aggregation: a pnpm/npm/yarn workspace member
+# (e.g. apps/web) commonly carries its own tsconfig.json with its own @/ paths entry,
+# and the repo root may have no tsconfig.json at all — checking only the root produced
+# false IMPORT_NOT_IN_CONTRACT violations for every test under a workspace member whose
+# tsconfig lives elsewhere. Builds a table of "<member_dir><TAB><alias_target relative
+# to member_dir>" (plus a "." entry for the root, if it has one), so each test file's
+# own rel_dir picks its nearest enclosing member's alias instead of a single global one.
+node -e "
+  const fs = require('fs');
+  const path = require('path');
+  const repoPath = '$REPO_PATH';
+
+  function aliasFromTsconfig(tsconfigPath) {
     try {
-      const t = require('$REPO_PATH/tsconfig.json');
+      const t = require(tsconfigPath);
       const paths = (t.compilerOptions && t.compilerOptions.paths) || {};
       const key = Object.keys(paths).find(k => k.startsWith('@/'));
-      if (key) console.log(paths[key][0].replace(/\/\*\$/, ''));
+      if (key) return paths[key][0].replace(/\/\*\$/, '').replace(/^\.\//, '');
     } catch (e) {}
-  " 2>/dev/null)
-  [ -n "$RESOLVED" ] && ALIAS_TARGET="$RESOLVED"
+    return null;
+  }
+
+  const lines = [];
+
+  const rootTsconfig = path.join(repoPath, 'tsconfig.json');
+  if (fs.existsSync(rootTsconfig)) {
+    const alias = aliasFromTsconfig(rootTsconfig);
+    if (alias) lines.push('.\t' + alias);
+  }
+
+  const workspaceFile = path.join(repoPath, 'pnpm-workspace.yaml');
+  if (fs.existsSync(workspaceFile)) {
+    const wsLines = fs.readFileSync(workspaceFile, 'utf-8').split('\n');
+    let inPackages = false;
+    const patterns = [];
+    for (const line of wsLines) {
+      if (/^packages:/.test(line)) { inPackages = true; continue; }
+      if (inPackages) {
+        const m = line.match(/^\s*-\s*['\"]?([^'\"#]+)['\"]?\s*\$/);
+        if (m) { patterns.push(m[1].trim()); continue; }
+        if (/^\S/.test(line)) inPackages = false;
+      }
+    }
+    for (const pattern of patterns) {
+      if (pattern.endsWith('/*')) {
+        const dir = path.join(repoPath, pattern.slice(0, -2));
+        if (fs.existsSync(dir)) {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const memberDir = path.join(dir, entry.name);
+            const memberRel = path.relative(repoPath, memberDir);
+            const tsconfigPath = path.join(memberDir, 'tsconfig.json');
+            if (fs.existsSync(tsconfigPath)) {
+              const alias = aliasFromTsconfig(tsconfigPath);
+              if (alias) lines.push(memberRel + '\t' + alias);
+            }
+          }
+        }
+      } else {
+        const memberDir = path.join(repoPath, pattern);
+        const tsconfigPath = path.join(memberDir, 'tsconfig.json');
+        if (fs.existsSync(tsconfigPath)) {
+          const alias = aliasFromTsconfig(tsconfigPath);
+          if (alias) lines.push(pattern + '\t' + alias);
+        }
+      }
+    }
+  }
+
+  console.log(lines.join('\n'));
+" 2>/dev/null | awk -F'\t' 'NF==2 { print length($1)"\t"$0 }' | sort -t$'\t' -k1,1 -rn | cut -f2- > "$TMP/alias_map"
+
+# Fallback default when nothing resolved anywhere (single-project repo, no monorepo, no tsconfig).
+if [ ! -s "$TMP/alias_map" ]; then
+  printf '.\tsrc\n' > "$TMP/alias_map"
 fi
 
 if [ -s "$TMP/contract_files" ]; then
@@ -228,7 +292,25 @@ if [ -s "$TMP/contract_files" ]; then
       | grep -E '^(\./|\.\./|@/)' | sort -u | while IFS= read -r imp; do
         [ -z "$imp" ] && continue
         if [[ "$imp" == @/* ]]; then
-          resolved="${ALIAS_TARGET}/${imp#@/}"
+          member_dir=""
+          alias_target="src"
+          while IFS=$'\t' read -r m_dir m_alias; do
+            [ -z "$m_dir" ] && continue
+            if [ "$m_dir" = "." ]; then
+              member_dir="."
+              alias_target="$m_alias"
+              break
+            elif [ "$rel_dir" = "$m_dir" ] || [[ "$rel_dir" == "$m_dir"/* ]]; then
+              member_dir="$m_dir"
+              alias_target="$m_alias"
+              break
+            fi
+          done < "$TMP/alias_map"
+          if [ -z "$member_dir" ] || [ "$member_dir" = "." ]; then
+            resolved="${alias_target}/${imp#@/}"
+          else
+            resolved="${member_dir}/${alias_target}/${imp#@/}"
+          fi
         else
           resolved=$(node -e "console.log(require('path').normalize(require('path').join('$rel_dir', '$imp')))" 2>/dev/null)
           [ -z "$resolved" ] && resolved="$imp"

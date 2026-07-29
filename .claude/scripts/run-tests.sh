@@ -142,6 +142,34 @@ if [ ! -d "$SANDBOX/node_modules" ] && [ -f "$SANDBOX/package.json" ]; then
   echo "Dependencies installed."
 fi
 
+# ── Step 4b: Build workspace library packages (e.g. @scope/shared) ───────────
+# A workspace member's build output (e.g. packages/shared/dist) is typically
+# git-ignored and only ever built locally in the real repo — never committed —
+# so a fresh disposable worktree has source but no dist/, and any package.json
+# "main"/"exports" pointing at dist/ fails to resolve at test time even though
+# nothing about the app code is wrong. Build every workspace member NOT under
+# apps/ (pnpm's recursive commands run in topological order by default, so
+# libs build before whatever imports them) — apps are excluded because they're
+# exercised directly by the test command below, not by a prerequisite build,
+# and at least one app in this class of repo (a Nest/Prisma API) can fail a
+# full `build` for reasons unrelated to this pipeline (e.g. `prisma generate`
+# never having run in the sandbox) without that mattering to the tests we
+# actually run. Skipped entirely for non-workspace repos.
+if [ -f "$SANDBOX/pnpm-workspace.yaml" ]; then
+  echo "Building workspace library packages (topological, --if-present, apps/ excluded)..."
+  if ! (cd "$SANDBOX" && pnpm --filter '!./apps/**' -r --if-present run build) >"$OUTPUT_FILE" 2>&1; then
+    echo "ERROR: workspace package build failed."
+    cat "$OUTPUT_FILE"
+    log_report "**ERROR:** workspace package build failed in sandbox (\`pnpm --filter '!./apps/**' -r --if-present run build\`)."
+    log_report ""
+    log_report '```'
+    log_report "$(tail -40 "$OUTPUT_FILE")"
+    log_report '```'
+    exit 3
+  fi
+  echo "Workspace library packages built."
+fi
+
 # ── Step 5: Pre-flight — TypeScript syntax check (fast, no execution) ─────────
 # Runs AFTER npm install so node_modules exists. Uses the sandbox's own local
 # tsc only — never `npx`, which resolves and installs an arbitrary `tsc` package
