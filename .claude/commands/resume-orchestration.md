@@ -81,9 +81,8 @@ Every commit this pipeline makes lands directly in {REPO} on `{BRANCH}`, so befo
 resuming any work, put the repo back in that state:
 
 ```bash
-cd "{REPO}"
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-DIRTY=$(git status --porcelain)
+CURRENT_BRANCH=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
+DIRTY=$(git -C "{REPO}" status --porcelain)
 ```
 
 **If `$DIRTY` is non-empty:** STOP. Tell the user:
@@ -94,8 +93,7 @@ Do not proceed.
 
 **If clean and `$CURRENT_BRANCH` is not `{BRANCH}`:**
 ```bash
-git checkout "{BRANCH}"
-cd "$ORCHESTRATOR_ROOT"
+git -C "{REPO}" checkout "{BRANCH}"
 ```
 
 **If clean and already on `{BRANCH}`:** nothing to do, continue.

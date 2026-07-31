@@ -41,8 +41,7 @@ per plan step, as the work happens — not copied in at the end. That means {REP
 must be clean before anything starts.
 
 ```bash
-cd "{REPO}"
-DIRTY=$(git status --porcelain)
+DIRTY=$(git -C "{REPO}" status --porcelain)
 ```
 
 **If `$DIRTY` is non-empty:** STOP. Tell the user:
@@ -54,10 +53,9 @@ Do not create a run folder. Do not proceed any further.
 **If clean:**
 ```bash
 RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
-ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+ORIGINAL_BRANCH=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
 BRANCH="orchestrator/$RUN_ID"
-git checkout -B "$BRANCH"
-cd "$ORCHESTRATOR_ROOT"
+git -C "{REPO}" checkout -B "$BRANCH"
 echo "$RUN_ID / $BRANCH (from $ORIGINAL_BRANCH)"
 ```
 
@@ -186,20 +184,18 @@ before any implementation exists, directly on `{BRANCH}`:
 
 ```bash
 cp -r "runs/{RUN_ID}/tests/." "{REPO}/"
-cd "{REPO}"
-git add -A
+git -C "{REPO}" add -A
 ```
 
-If nothing is staged (`git diff --cached --quiet` exits 0 — only happens if a
+If nothing is staged (`git -C "{REPO}" diff --cached --quiet` exits 0 — only happens if a
 retry produced byte-identical tests), skip the commit. Otherwise, read `retry_count`
 from `runs/{RUN_ID}/state.md`: `0` means this is the first attempt, `>0` means a
 fix pass triggered by Stage 4a/4b below.
 
 ```bash
-git commit -m "{MSG}
+git -C "{REPO}" commit -m "{MSG}
 
 Run: {RUN_ID}"
-cd "$ORCHESTRATOR_ROOT"
 ```
 
 Where `{MSG}` is:
@@ -331,19 +327,16 @@ bottom. For each row (`{file}`, `{action}`, `{purpose}`):
 ```bash
 mkdir -p "{REPO}/$(dirname '{file}')"
 cp "runs/{RUN_ID}/code/{file}" "{REPO}/{file}"
-cd "{REPO}"
-git add "{file}"
+git -C "{REPO}" add "{file}"
 ```
 
-If nothing is staged for `{file}` (`git diff --cached --quiet -- "{file}"` exits 0),
+If nothing is staged for `{file}` (`git -C "{REPO}" diff --cached --quiet -- "{file}"` exits 0),
 it's unchanged from what's already committed — skip it, no commit. Otherwise
 commit it on its own, right now, before moving to the next row:
 
 - `retry_count` is `0`: `git commit -m "{VERB}: {file}\n\n{purpose}\n\nRun: {RUN_ID}"` — `{VERB}` is `create` if the table's Action column says CREATE, `modify` if MODIFY.
 - `retry_count` is `>0`: `git commit -m "fix: {file} — address feedback (retry {retry_count}/2)\n\nRun: {RUN_ID}"`
 
-```bash
-cd "$ORCHESTRATOR_ROOT"
 ```
 
 One commit per changed file, in table order — the plan's Files-changed table becomes
@@ -499,10 +492,8 @@ pipeline worked, one commit per step — there is nothing left to copy or apply.
 Collect the commit log for the report:
 
 ```bash
-cd "{REPO}"
-COMMIT_LOG=$(git log --oneline "{ORIGINAL_BRANCH}..{BRANCH}")
-COMMIT_COUNT=$(git rev-list --count "{ORIGINAL_BRANCH}..{BRANCH}")
-cd "$ORCHESTRATOR_ROOT"
+COMMIT_LOG=$(git -C "{REPO}" log --oneline "{ORIGINAL_BRANCH}..{BRANCH}")
+COMMIT_COUNT=$(git -C "{REPO}" rev-list --count "{ORIGINAL_BRANCH}..{BRANCH}")
 ```
 
 Append to `runs/{RUN_ID}/report.md`:
