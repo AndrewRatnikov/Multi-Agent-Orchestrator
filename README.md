@@ -8,7 +8,7 @@ A spec-driven, test-first multi-agent pipeline for Claude Code. Hand it an idea 
 /run-orchestration "add a Budget Summary card component"
 ```
 
-The pipeline runs sequentially, with a review gate after each stage:
+The pipeline runs sequentially, with a review gate after each stage. Each LLM stage is its own subagent (`.claude/agents/orch-*.md`) with a fresh context, its own model and tool limits, and a hook that only lets it write into its own artifact folder. The main session only orchestrates: it owns state, retries, gates and git.
 
 ```
 Product agent    → prd.md
@@ -17,7 +17,16 @@ Tester agent     → test files (written before any code)
 Test-Reviewer    → gate: are the tests any good?
 Coder agent      → implementation files
 Test sandbox     → ground truth: exit code only
+Verify           → the committed branch as CI/deploy see it: frozen install, lint,
+                   typecheck, builds, all tests, migrations + e2e on a throwaway DB
 ```
+
+Verify's checks come from the target repo's `.claude/verify.json` (read from the original
+branch, so a run can't weaken them). Database steps need Docker running, or
+`VERIFY_DATABASE_URL` pointing at a local throwaway Postgres; without either, the run
+stops as INCOMPLETE rather than claiming it's verified. Optional: with `NEON_API_KEY` and
+`NEON_PROJECT_ID` (env or `~/.config/ai-orchestrator/neon.env`), new migrations are also
+applied to a temporary Neon branch, a copy of the real data.
 
 Before any of that runs, the target repo must be clean — the pipeline immediately
 checks out a new `orchestrator/{run_id}` branch there and works on it directly for
@@ -51,11 +60,15 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 
 ```
 .claude/
-  commands/        # slash command definitions (agent prompts)
-  scripts/         # repo-digest.sh, run-tests.sh, log-cost.sh
+  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder
+  commands/        # /run-orchestration, /resume-orchestration
+  scripts/         # repo-digest.sh, check-contract.sh, run-tests.sh, verify.py, log-cost.sh, guard-writes.sh
 runs/              # one folder per run, excluded from git
-memory.md          # persistent conventions and decisions across runs
+memory.md          # pipeline-level lessons only
+repo-notes/        # notes for target repos that don't have .claude/rules/ yet
 ```
+
+Knowledge about a **target repo** lives in that repo's `.claude/rules/*.md` (and CLAUDE.md), not here. Agents read it from there, and plain Claude Code sessions in that repo pick it up too.
 
 ## Status
 
