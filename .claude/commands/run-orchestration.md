@@ -82,7 +82,27 @@ your repo as it works, so it needs a clean tree to start from. Commit or stash y
 changes, then re-run."
 Do not create a run folder. Do not proceed any further.
 
-**If clean:**
+**If clean, check the starting point.** The new branch is cut from whatever {REPO}
+has checked out, so starting from an old, unmerged branch silently stacks this run
+on top of that branch's work:
+
+```bash
+CURRENT=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
+DEFAULT=$(git -C "{REPO}" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+[ -z "$DEFAULT" ] && DEFAULT=$(git -C "{REPO}" rev-parse --verify --quiet main >/dev/null && echo main || echo master)
+echo "current=$CURRENT default=$DEFAULT"
+git -C "{REPO}" log --oneline "$DEFAULT..$CURRENT" | head -10
+```
+
+If `$CURRENT` starts with `orchestrator/`, or is not `$DEFAULT` and has commits that
+`$DEFAULT` doesn't (the log above is non-empty): **stop and ask the user** before
+creating anything. Show them the branch and those commits: "{REPO} is on `$CURRENT`,
+not `$DEFAULT`. This run would be built on top of these N unmerged commits. Continue
+from `$CURRENT`, or should I switch to `$DEFAULT` first?" If they choose `$DEFAULT`, run
+`git -C "{REPO}" checkout "$DEFAULT"` and continue. Unattended (no one to ask): stop
+with that message rather than guessing.
+
+Then:
 ```bash
 RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
 ORIGINAL_BRANCH=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
@@ -118,6 +138,7 @@ timestamp: {TIMESTAMP}
 last_artifact:
 pause_reason:
 retry_count: 0
+verify_retries: 0
 ```
 
 ### Write report.md
@@ -211,12 +232,31 @@ On `status: DONE`: run the scope check (step 5 of the procedure). If the RESULT 
 ### Commit the tests to {REPO}
 
 Tests are the first thing that lands in the target repo — written and committed
-before any implementation exists, directly on `{BRANCH}`:
+before any implementation exists, directly on `{BRANCH}`.
 
+**First, check the file paths** (mechanical, before anything touches {REPO}):
+```bash
+python3 .claude/scripts/check-paths.py "{RUN_ID}" tests --prune
+```
+Every file under `runs/{RUN_ID}/tests/` must be a test file declared in plan.md's
+Files changed table, at the same repo-relative path (`tests/` mirrors the repo root,
+so repo file `tests/foo.test.ts` is `runs/{RUN_ID}/tests/tests/foo.test.ts`).
+`--prune` moves leftovers from an earlier attempt to `archive/strays-*`.
+- Exit 1 (violations): nothing is copied. Append them to `report.md` and treat them
+  exactly like a Stage 4a contract violation: re-run the Tester with them as `FEEDBACK`,
+  under the same retry cap.
+- Exit 3: plan.md has no Files changed table. Stop and resume from architect.
+
+**Then copy, auto-fix and commit:**
 ```bash
 cp -r "runs/{RUN_ID}/tests/." "{REPO}/"
+python3 .claude/scripts/autofix.py "{REPO}" "{RUN_ID}" tests
 git -C "{REPO}" add -A
 ```
+`autofix.py` runs the repo's auto-fixer (usually `eslint --fix`) on these files only
+and copies the fixed versions back into `runs/{RUN_ID}/tests/`, so the run folder, the
+repo and what the reviewer reads stay identical. It never blocks; append its output
+line to `report.md`.
 
 If nothing is staged (`git -C "{REPO}" diff --cached --quiet` exits 0 — only happens if a
 retry produced byte-identical tests), skip the commit. Otherwise, read `retry_count`
@@ -348,19 +388,29 @@ Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_co
 **Run subagent `orch-coder`** (see "How to run a subagent stage"). On a retry, pass the sandbox failure output or check-contract violations as `FEEDBACK`.
 
 - `status: CONTRACT_MISMATCH` → append its `detail` to `report.md`, set `status: paused`, `pause_reason: contract-mismatch` in `state.md`, and handle it as described at the end of this stage (no commits for this pass).
-- `status: DONE` → run the scope check (step 5 of the procedure), confirm every row of plan.md's Files-changed table has a file under `runs/{RUN_ID}/code/` (missing ones are a Coder failure: append to report and treat like a Stage 5b violation), then commit as below. If its `notes` suspect an environment issue (Test command, generated client, shared build), surface that to the user; the fix may belong in `repo-digest.md`'s Test command, not in the code.
+- `status: DONE` → run the scope check (step 5 of the procedure), then the path check:
+  `python3 .claude/scripts/check-paths.py "{RUN_ID}" code`. Violations (a declared file
+  missing, an undeclared file, or a test file written by the Coder) are a Coder failure:
+  append them to the report and treat them like a Stage 5b violation (Coder retry with
+  them as `FEEDBACK`, same cap). Only when it's clean, commit as below. If its `notes` suspect an environment issue (Test command, generated client, shared build), surface that to the user; the fix may belong in `repo-digest.md`'s Test command, not in the code.
 
 ### Commit each implemented file to {REPO}
 
 Read `retry_count` from `runs/{RUN_ID}/state.md` once — `0` means first pass, `>0`
 means this is a fix pass triggered by Stage 5b or Stage 6 below, for every file below.
 
-Read the `## Files changed` table in `runs/{RUN_ID}/plan.md`. Work through it top to
-bottom. For each row (`{file}`, `{action}`, `{purpose}`):
+Copy all of the Coder's files in and auto-fix them once, before committing:
+```bash
+cp -r "runs/{RUN_ID}/code/." "{REPO}/"
+python3 .claude/scripts/autofix.py "{REPO}" "{RUN_ID}" code
+```
+(Append the autofix output line to `report.md`.)
+
+Then read the `## Files changed` table in `runs/{RUN_ID}/plan.md` and work through it top
+to bottom. **Skip rows for test files** (files that exist under `runs/{RUN_ID}/tests/`):
+Stage 3 already committed them. For each remaining row (`{file}`, `{action}`, `{purpose}`):
 
 ```bash
-mkdir -p "{REPO}/$(dirname '{file}')"
-cp "runs/{RUN_ID}/code/{file}" "{REPO}/{file}"
 git -C "{REPO}" add "{file}"
 ```
 
@@ -541,15 +591,32 @@ yourself or override the result.
 **0 (PASS):** continue to Stage 7.
 
 **1 (FAIL):** a check fails because of this run. Show the user the table from
-`verify.md`, then route by what failed:
-- A lockfile problem (install step with the lockfile hint): fix it yourself with the
-  Stage 5 lockfile commands, then re-run Stage 6b. This doesn't count as a retry.
-- Anything else (lint, typecheck, build, tests, migrations, e2e): it's a Coder
-  problem. Use the same retry logic and `retry_count` as Stage 6: if `retry_count >= 2`
-  stop and tell the user (`/resume-orchestration {RUN_ID} --from coder` after they
-  intervene). Otherwise increment it, archive `code/`, and re-run Stage 5 with
-  `FEEDBACK` = the "Failures caused by this run" section of `verify.md`, verbatim.
-  Then Stage 5b → 6 → 6b again.
+`verify.md`, then route each problem to whoever owns the file. The machine-readable
+summary at the end of `verify.md` has `new_errors_by_file` (repo file → its new error
+lines) and `failed_steps_without_file_info` (failed steps whose output names no file,
+e.g. a failing e2e suite).
+
+- **Lockfile** (install step with the lockfile hint): fix it yourself with the Stage 5
+  lockfile commands, then re-run Stage 6b. This doesn't count as a retry.
+- **Otherwise**, read `verify_retries` from `state.md` (missing counts as 0). If it is `>= 2`, stop and tell the
+  user (show the failures; they can fix by hand and `/resume-orchestration {RUN_ID} --from verify`,
+  or resume from tester/coder). If it is `< 2`, increment it and split the problems:
+  - **Tester-owned:** files in `new_errors_by_file` that exist under `runs/{RUN_ID}/tests/`.
+  - **Coder-owned:** every other file in `new_errors_by_file`, plus every step in
+    `failed_steps_without_file_info`.
+
+  1. If there are Tester-owned problems: archive `tests/`, re-run **Stage 3** with `FEEDBACK` =
+     those files' error lines verbatim, plus: "These are lint/type errors from Verify. Fix only
+     these; don't change what any test asserts." Then **Stage 4** (4a, then 4b with
+     `NOTE`: "This pass only fixes lint/type errors from Verify; confirm no assertion was
+     weakened, removed or loosened."). Stage 4's usual retry rules apply.
+  2. If there are Coder-owned problems: archive `code/`, re-run **Stage 5** with `FEEDBACK` =
+     those errors (and the failing steps' sections from `verify.md`). If there are none, skip
+     Stage 5: the implementation is already committed and unchanged.
+  3. Then Stage 5b → 6 → 6b as usual.
+
+  Never move a Tester-owned problem to the Coder or the other way round: the Coder can't
+  edit tests, and the Tester can't edit code.
 
 **3 (ERROR):** infrastructure (worktree, Docker start, etc.), not a code verdict.
 Set `status: failed`, `pause_reason: verify-infrastructure-error`, show the error, stop.

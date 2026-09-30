@@ -97,24 +97,70 @@ def tail(text, n=60):
 
 
 ERROR_LINE = re.compile(r"error|fail|✕|✗|×|expected|TS\d{4}|cannot find|not assignable|unexpected", re.I)
+# Tool summary lines whose numbers change whenever the error count changes; never "new errors".
+SUMMARY_LINE = re.compile(r"^\s*(✖|×)?\s*\d+ problems?\b|potentially fixable|^\s*(Tests?|Test Files|Suites?)\s*:?\s+\d+|"
+                          r"^\s*Found \d+ errors?|^\s*\d+ errors? (in|and)\b|ELIFECYCLE|ERR_PNPM_RECURSIVE|npm (ERR!|error) (code|path|command|errno|A complete log)|Exit status \d+", re.I)
+FILE_HEADER = re.compile(r"^(\S*/)?[\w@.\-/]+\.(tsx?|jsx?|mjs|cjs|vue|py|css|json)$")
+
+
+def _norm_path(s, worktree):
+    if worktree:
+        s = s.replace(worktree, "<WT>")
+    return re.sub(r"\S*orchestrator-(verify|sandbox)-[\w-]+", "<WT>", s)
 
 
 def error_lines(text, worktree):
-    """Normalized error-looking lines, used to tell 'the same failure as on the original
-    branch' from 'new errors on top of a failure that already existed'."""
-    out = set()
-    for line in text.splitlines():
-        if not ERROR_LINE.search(line):
+    """Normalized error-looking lines as a multiset (Counter), used to tell 'the same failure
+    as on the original branch' from 'new errors on top of a failure that already existed'.
+
+    Line/column numbers are dropped so an unchanged error that merely moved (because the run
+    added lines above it) isn't counted as new. For tools that print the file on its own line
+    and the errors indented below it (ESLint's default formatter), each error is prefixed with
+    that file so identical messages in different files stay distinct."""
+    from collections import Counter
+    out = Counter()
+    current_file = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
             continue
-        if worktree:
-            line = line.replace(worktree, "<WT>")
-        line = re.sub(r"\S*orchestrator-verify-[\w-]+", "<WT>", line)  # any temp dir (macOS: /var/folders/...)
-        line = re.sub(r"\(?\d+(\.\d+)?\s?(ms|s)\)?", "", line)          # durations
-        line = re.sub(r"\d{4}-\d\d-\d\dT[\d:.]+Z?", "", line)           # timestamps
+        if FILE_HEADER.match(stripped) and not raw.startswith((" ", "\t")):
+            current_file = _norm_path(stripped, worktree)
+            continue
+        if not ERROR_LINE.search(raw) or SUMMARY_LINE.search(raw):
+            continue
+        line = _norm_path(raw, worktree)
+        indented = raw.startswith((" ", "\t"))
+        line = re.sub(r"^\s*\d+:\d+\s+", "", line)                          # eslint: '  6:44  error ...'
+        line = re.sub(r"\(\d+,\d+\)", "", line)                         # tsc: file.ts(3,1)
+        line = re.sub(r":\d+(:\d+)?\b", "", line)                         # file.ts:3:1
+        line = re.sub(r"\(?\d+(\.\d+)?\s?(ms|s)\)?", "", line)            # durations
+        line = re.sub(r"\d{4}-\d\d-\d\dT[\d:.]+Z?", "", line)             # timestamps
         line = re.sub(r"\s+", " ", line).strip()
-        if line:
-            out.add(line)
+        if not line:
+            continue
+        if indented and current_file:
+            line = current_file + " :: " + line
+        out[line] += 1
     return out
+
+
+def new_error_lines(branch_out, base_out, base_worktree):
+    """Error lines (with multiplicity) present on the branch but not on the original branch."""
+    diff = error_lines(branch_out, "") - error_lines(base_out, base_worktree)
+    lines = []
+    for line, n in sorted(diff.items()):
+        lines.extend([line] * n)
+    return lines
+
+
+def files_in(lines):
+    """Repo-relative files mentioned in normalized error lines."""
+    files = set()
+    for l in lines:
+        for m in re.finditer(r"(?:<WT>/|^|\s)([\w@.\-]+(?:/[\w@.\-]+)+\.(?:tsx?|jsx?|mjs|cjs|vue|py|css|json))\b", l):
+            files.add(m.group(1))
+    return sorted(files)
 
 
 def slug(s):
@@ -165,9 +211,11 @@ def default_config(worktree):
     }
 
 
-def base_env(config, db_url):
+def base_env(config, db_url, refs=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith(SCRUB_PREFIXES)}
     env["CI"] = "true"
+    for k, v in (refs or {}).items():
+        env[k] = v
     env["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
     for k, v in (config.get("env") or {}).items():
         env[k] = str(v)
@@ -262,9 +310,10 @@ class Worktree:
 
 # ── running a step list ──────────────────────────────────────────────────────
 
-def run_steps(worktree, config, steps, db, log_dir, prefix, step_timeout):
-    """Run install + steps in a worktree. Returns list of result dicts."""
-    env = base_env(config, db.url if db else None)
+def run_steps(worktree, config, steps, db, log_dir, prefix, step_timeout, refs=None):
+    """Run install + steps in a worktree. Returns list of result dicts.
+    refs: VERIFY_BASE_REF / VERIFY_BRANCH, so plan commands never hard-code `main`."""
+    env = base_env(config, db.url if db else None, refs)
     results = []
 
     install = config.get("install")
@@ -437,7 +486,10 @@ def main():
                 config = default_config(wt.path)
                 generic = True
             steps = list(config.get("steps", []))
+            standard = {re.sub(r"\s+", " ", s["run"]).strip() for s in steps}
             for cmd in plan_verify_commands(run_dir):
+                if re.sub(r"\s+", " ", cmd).strip() in standard:
+                    continue  # already a standard step; don't run it twice
                 steps.append({"name": "plan: " + cmd[:60], "run": cmd, "plan": True})
 
             mig_dir = (config.get("migrations") or {}).get("dir")
@@ -450,7 +502,9 @@ def main():
             if any(s.get("needs") == "database" for s in steps):
                 db = Database(config, args.run_id).start()
                 dbs.append(db)
-            results = run_steps(wt.path, config, steps, db, log_dir, "", args.step_timeout)
+            refs = {"VERIFY_BASE_REF": original, "VERIFY_BRANCH": branch,
+                    "VERIFY_MERGE_BASE": git(repo, "merge-base", original, branch, check=False)}
+            results = run_steps(wt.path, config, steps, db, log_dir, "", args.step_timeout, refs)
 
             try:
                 real_data = neon_real_data_check(repo, wt.path, config, new_migrations, args.run_id, log_dir)
@@ -470,19 +524,21 @@ def main():
                     if any(s.get("needs") == "database" for s in base_steps):
                         bdb = Database(config, args.run_id + "-baseline").start()
                         dbs.append(bdb)
-                    base = run_steps(bwt.path, config, base_steps, bdb, log_dir, "baseline-", args.step_timeout)
+                    base = run_steps(bwt.path, config, base_steps, bdb, log_dir, "baseline-", args.step_timeout,
+                                     {"VERIFY_BASE_REF": original, "VERIFY_BRANCH": original, "VERIFY_MERGE_BASE": original})
                     base_path = bwt.path
                 by_index = {r["index"]: r for r in base}
                 for r in results:
                     b = by_index.get(r["index"])
                     if r["index"] not in failed_idx or not b or b["status"] not in (FAIL, TIMEOUT):
                         continue
-                    new_errors = error_lines(r["out"], "") - error_lines(b["out"], base_path)
+                    new_errors = new_error_lines(r["out"], b["out"], base_path)
                     if new_errors:
                         # Fails on the original branch too, but this run adds errors of its own.
+                        r["new_errors"] = new_errors
                         r["detail"] = ("Also fails on `{}`, but this run adds {} new error line(s) "
-                                       "not present there:\n\n".format(original, len(new_errors)) +
-                                       "\n".join("- " + l for l in sorted(new_errors)[:30]))
+                                       "not present there (line numbers ignored):\n\n".format(original, len(new_errors)) +
+                                       "\n".join("- " + l for l in new_errors[:40]))
                     else:
                         r["status"] = PREEXISTING
                 baseline_note = "Failing steps were re-run on `{}`; those that fail there too are marked PRE-EXISTING.".format(original)
@@ -552,11 +608,28 @@ def main():
             md += ["", "Pending on the real database right now (from the Neon branch check): " +
                    ", ".join("`{}`".format(p) for p in real_data["pending_in_prod"])]
         md += ["", "Apply with `prisma migrate deploy` against the production database as part of the deploy.", ""]
+    # Which files the new errors are in, so the orchestrator can route each fix to the
+    # agent that owns the file (Tester: test files, Coder: everything else).
+    by_file, no_file_steps = {}, []
+    for r in failed:
+        lines = r.get("new_errors") or list(error_lines(r.get("out", ""), ""))
+        hit = False
+        for l in lines:
+            for f in files_in([l]):
+                by_file.setdefault(f, [])
+                if len(by_file[f]) < 30:
+                    by_file[f].append(l)
+                hit = True
+        if not hit:
+            no_file_steps.append(r["name"])
     md += ["---", "Machine-readable summary:", "", "```json",
            json.dumps({"verdict": verdict, "exit_code": code,
                        "failed": [r["name"] for r in failed],
                        "not_verified": [r["name"] for r in missing],
                        "pre_existing": [r["name"] for r in pre],
+                       "files_with_new_errors": sorted(by_file),
+                       "new_errors_by_file": by_file,
+                       "failed_steps_without_file_info": no_file_steps,
                        "new_migrations": new_migrations}, indent=2),
            "```", ""]
     with open(os.path.join(run_dir, "verify.md"), "w") as f:

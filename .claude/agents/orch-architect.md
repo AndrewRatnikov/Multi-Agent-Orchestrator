@@ -77,7 +77,11 @@ Step-by-step: which files are modified vs created, what data/props flow where, s
 |------|--------|---------|
 | apps/web/src/components/budget-summary.tsx | CREATE | Main component |
 
-(Paths are relative to the repo root. The orchestrator commits one file per row, in this order.)
+(Paths are relative to the repo root. List **every** file this run creates or modifies,
+**including every test file the Tester will write** (purpose e.g. "tests (Tester)"). A
+script checks the Tester's and Coder's output against this table before anything is
+committed, and rejects undeclared files. The orchestrator commits code files one per row,
+in this order; test rows are committed together in the Tester's commit.)
 
 ## Interface Contract
 
@@ -115,6 +119,9 @@ The Verify stage already runs the repo's standard checks from `{REPO}/.claude/ve
 # worktree with a throwaway database as $DATABASE_URL. Must be safe: no real DB,
 # no network, no secrets. Take these from the backlog item's own verification
 # steps where it has them. Leave the block empty if the standard checks cover it.
+# Don't repeat the standard checks (test/lint/typecheck/build); they already run.
+# To compare with the base, use "$VERIFY_BASE_REF...HEAD", never a hard-coded
+# `main`: a run can branch from something else. ($VERIFY_MERGE_BASE is also set.)
 ```
 
 Manual (can't be automated safely; these go into the handoff checklist):

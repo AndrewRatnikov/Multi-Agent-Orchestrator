@@ -56,10 +56,10 @@ recommendation: resume from architect to correct the contract
 
 ## Write the implementation
 
-Create files under `runs/{RUN_ID}/code/`, mirroring the exact repo-relative paths from the plan's Files-changed table (e.g. `code/apps/web/src/components/budget-summary.tsx`). Produce a file for every row in the table.
+Create files under `runs/{RUN_ID}/code/`, mirroring the exact repo-relative paths from the plan's Files-changed table (e.g. `code/apps/web/src/components/budget-summary.tsx`). Produce a file for every row in the table **except test files** (those are the Tester's; a script rejects test files in `code/`, and any file the table doesn't list).
 
 Self-review:
-- [ ] Every Files-changed row has a file in `code/`
+- [ ] Every non-test Files-changed row has a file in `code/`, and there's nothing else in `code/`
 - [ ] Every path, export and testid matches the contract
 - [ ] MODIFY files are complete and preserve unrelated existing behaviour
 - [ ] No test file was touched

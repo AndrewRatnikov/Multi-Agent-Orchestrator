@@ -48,7 +48,7 @@ Read:
 
 1. Extract the Interface Contract: files, exports, props, testids.
 2. Map each acceptance criterion to one or more test cases.
-3. Write test files under `runs/{RUN_ID}/tests/`, mirroring the repo's real directory structure and naming (e.g. `tests/apps/web/src/app/settings/page.test.tsx`).
+3. Write each test file at exactly the path plan.md's Files changed table gives it, under `runs/{RUN_ID}/tests/`. That folder mirrors the **repo root**: repo file `apps/web/src/app/settings/page.test.tsx` goes to `runs/{RUN_ID}/tests/apps/web/src/app/settings/page.test.tsx`, and repo file `tests/foo.test.ts` goes to `runs/{RUN_ID}/tests/tests/foo.test.ts` (yes, `tests/tests/`). A script rejects any file that isn't declared in the table, so if you need a file the plan doesn't list (a fixture, a helper), report it as a CONTRACT_GAP instead of writing it.
 4. Self-review:
    - [ ] Every import path, testid and prop matches the contract character for character
    - [ ] Every acceptance criterion has at least one test
@@ -57,6 +57,8 @@ Read:
    - [ ] Fixtures pass the environment's own validation (real UUIDs, emails the browser accepts, etc., per the repo's rules)
    - [ ] All CONTRACT_GAPs are listed at the top of their files
    - [ ] Existing test files you extended still contain all of their original tests
+   - [ ] Every file you wrote is listed in plan.md's Files changed table, at that exact path
+   - [ ] Tests follow the repo's lint rules as far as you can tell (import order, no unnecessary type assertions such as `as HTMLInputElement` where a typed query works); an auto-fixer runs after you, but it can't fix everything
 
 ## Finish
 

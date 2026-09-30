@@ -164,6 +164,10 @@ Tell the user the sandbox environment is broken and show the report entry.
 You must NOT manually replicate the sandbox, run tests yourself, or declare
 PASS/FAIL by any other means. The sandbox exit code is the only accepted verdict.
 
+Stages 3 and 5 include the path check (`check-paths.py`) and `autofix.py` before their
+commits, and Stage 6b routes failures by file owner using `verify_retries`, all exactly as
+written in `run-orchestration.md`.
+
 ### If RESUME_FROM = `verify`
 Run Stage 6b exactly as in `run-orchestration.md` (`python3 .claude/scripts/verify.py "{REPO}" "{RUN_ID}"`),
 with the same exit-code routing, then Stage 7 on PASS.

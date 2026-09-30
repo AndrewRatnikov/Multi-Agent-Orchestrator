@@ -28,6 +28,12 @@ stops as INCOMPLETE rather than claiming it's verified. Optional: with `NEON_API
 `NEON_PROJECT_ID` (env or `~/.config/ai-orchestrator/neon.env`), new migrations are also
 applied to a temporary Neon branch, a copy of the real data.
 
+Before anything is committed, `check-paths.py` checks that the Tester's and Coder's files
+are exactly the ones the plan's Files changed table declares, and `autofix.py` runs the
+repo's auto-fixer (`"autofix"` in verify.json, default `eslint --fix` if the repo has it).
+When Verify finds new errors, each one goes back to whoever owns the file: test files to
+the Tester (then a quick re-review), everything else to the Coder.
+
 Before any of that runs, the target repo must be clean — the pipeline immediately
 checks out a new `orchestrator/{run_id}` branch there and works on it directly for
 the rest of the run. Planning docs (`prd.md`, `plan.md`) stay in this orchestrator
@@ -62,7 +68,7 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 .claude/
   agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder
   commands/        # /run-orchestration, /resume-orchestration
-  scripts/         # repo-digest.sh, check-contract.sh, run-tests.sh, verify.py, log-cost.sh, guard-writes.sh
+  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, log-cost.sh, guard-writes.sh
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet
