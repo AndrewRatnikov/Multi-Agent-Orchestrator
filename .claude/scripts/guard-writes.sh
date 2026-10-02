@@ -31,7 +31,7 @@ REAL_ROOT="$(cd "$ROOT" && pwd -P)"
 # Regexes, anchored. [^/]+ keeps a run id from swallowing extra path segments.
 case "$ROLE" in
   product)   PATTERNS=("^runs/run_[^/]+/prd\.md$") ;;
-  architect) PATTERNS=("^runs/run_[^/]+/plan\.md$" "^runs/run_[^/]+/repo-digest\.md$") ;;
+  architect) PATTERNS=("^runs/run_[^/]+/plan\.md$" "^runs/run_[^/]+/repo-digest\.md$" "^runs/run_[^/]+/contract\.json$") ;;
   tester)    PATTERNS=("^runs/run_[^/]+/tests/.+") ;;
   coder)     PATTERNS=("^runs/run_[^/]+/code/.+") ;;
   *) echo "guard-writes.sh: unknown role '$ROLE'" >&2; exit 2 ;;

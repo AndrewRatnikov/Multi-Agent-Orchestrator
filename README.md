@@ -28,6 +28,12 @@ stops as INCOMPLETE rather than claiming it's verified. Optional: with `NEON_API
 `NEON_PROJECT_ID` (env or `~/.config/ai-orchestrator/neon.env`), new migrations are also
 applied to a temporary Neon branch, a copy of the real data.
 
+The Interface Contract has two parts: the readable explanation in `plan.md`, and
+`runs/<id>/contract.json` with every name (files with owners, exports, and testids
+categorised as new / existing / template / test-only / removed, plus new packages).
+`check-contract.py` validates it right after the Architect, then checks the Tester's
+and Coder's output against it exactly (`check-contract.sh` remains only for old runs).
+
 Before anything is committed, `check-paths.py` checks that the Tester's and Coder's files
 are exactly the ones the plan's Files changed table declares, and `autofix.py` runs the
 repo's auto-fixer (`"autofix"` in verify.json, default `eslint --fix` if the repo has it).

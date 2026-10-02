@@ -87,11 +87,24 @@ def main():
     if not os.path.exists(plan):
         print("SETUP_ERROR: {} not found".format(plan))
         sys.exit(3)
-    declared = declared_files(plan)
+    owners = {}
+    contract = os.path.join(run_dir, "contract.json")
+    if os.path.exists(contract):
+        # contract.json is the source of truth when present: explicit owner per file.
+        import json
+        try:
+            files = json.load(open(contract)).get("files") or []
+            owners = {f["path"]: f.get("owner") for f in files if isinstance(f, dict) and f.get("path")}
+        except (ValueError, KeyError):
+            owners = {}
+    declared = list(owners) if owners else declared_files(plan)
     if declared is None:
         print("SETUP_ERROR: plan.md has no `## Files changed` table")
         sys.exit(3)
     declared_set = set(declared)
+    if owners:
+        global is_test
+        is_test = lambda path: owners.get(path) == "tester"  # noqa: E731
     tests_dir, code_dir = os.path.join(run_dir, "tests"), os.path.join(run_dir, "code")
     produced_tests, produced_code = files_under(tests_dir), files_under(code_dir)
     violations, pruned = [], []

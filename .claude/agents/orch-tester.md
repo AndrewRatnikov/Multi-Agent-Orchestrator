@@ -27,13 +27,14 @@ Read:
 1. `runs/{RUN_ID}/plan.md`: your primary input. The **Interface Contract** is your allowed vocabulary.
 2. `runs/{RUN_ID}/prd.md`: the acceptance criteria your tests must cover
 3. `runs/{RUN_ID}/repo-digest.md`: test framework, conventions, test command
-4. `memory.md` sections `## Pipeline conventions`, `## Pipeline gotchas`, `## check-contract.sh known false positives`
+4. `memory.md` sections `## Pipeline conventions` and `## Pipeline gotchas`
+5. `runs/{RUN_ID}/contract.json`: the exact names you may use (see rule 1)
 5. `{REPO}/.claude/rules/*.md`, if present, especially testing-environment gotchas (jsdom, React 19, fixtures), and `repo-notes/{basename of REPO}.md` if present
 6. Existing test files in `{REPO}` next to the files being changed: mirror their style, and **preserve them verbatim** when you extend one (see below)
 
 ## Strict rules
 
-1. **Never invent a name.** Every `data-testid`, import path, component name and prop name must appear verbatim in the Interface Contract.
+1. **Never invent a name.** Every `data-testid`, import path, component name and prop name must appear verbatim in the contract. A script checks your files against `contract.json`: testids must be listed there (`new`, `existing`, a template `instances` entry, `test_only` for ids that only exist inside your own fixtures, or `removed` for ids you assert are gone); imports must resolve to a repo file or a contract file; packages must be dependencies or in `packages.added` (import those normally).
 2. **If the contract is missing something, don't guess.** Write a `CONTRACT_GAP` comment:
    ```typescript
    // CONTRACT_GAP: need data-testid for the error state element — not specified in Interface Contract

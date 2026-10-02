@@ -201,7 +201,22 @@ Update `runs/{RUN_ID}/state.md`: set `step: architect`, `status: running`.
 
 **Run subagent `orch-architect`** (see "How to run a subagent stage"). Handle `NEEDS_INPUT` as described there.
 
-On `status: DONE`, confirm `runs/{RUN_ID}/plan.md` exists and that `repo-digest.md`'s `## Test command` is not `UNKNOWN`. Update `state.md`: `step: tester`, `last_artifact: runs/{RUN_ID}/plan.md`, `timestamp`. Show the user the Interface Contract the subagent pasted below its RESULT block, and the Test command, so they can spot problems before the Tester runs.
+On `status: DONE`, confirm `runs/{RUN_ID}/plan.md` exists and that `repo-digest.md`'s `## Test command` is not `UNKNOWN`. Then validate the machine-readable contract (mechanical, no LLM):
+
+```bash
+python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
+```
+
+It checks `runs/{RUN_ID}/contract.json` against its schema, against plan.md's Files changed
+table (they must list the same files), and against the repo: `create` files must not exist
+yet, `modify` files must, every `existing` testid must really be in the file it names, new
+testids must live in coder-owned files, and new packages need a `package.json` in the files.
+- Exit 0: continue.
+- Exit 1 or 3 (violations, or contract.json missing): re-run the Architect with them as
+  `FEEDBACK` ("Fix contract.json/plan.md so `check-contract.py validate` passes: {violations}").
+  At most 2 such retries; then stop and show the user the violations.
+
+Update `state.md`: `step: tester`, `last_artifact: runs/{RUN_ID}/plan.md`, `timestamp`. Show the user the Interface Contract the subagent pasted below its RESULT block, and the Test command, so they can spot problems before the Tester runs.
 
 After the Architect agent finishes, **log cost**:
 ```bash
@@ -292,9 +307,17 @@ Update `runs/{RUN_ID}/state.md`: set `step: test-reviewer`, `status: running`.
 ### Stage 4a — Mechanical contract check (runs first, no LLM, no cost)
 
 ```bash
-bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"
+if [ -f "runs/{RUN_ID}/contract.json" ]; then
+  python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" tests
+else
+  bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"   # older runs without contract.json
+fi
 CONTRACT_EXIT=$?
 ```
+With `contract.json` the check is exact: every testid a test uses must be declared there
+(new, existing, a template instance, test_only or removed), every import must resolve to a
+repo file or a contract file, every package must be a dependency or in `packages.added`,
+and network calls must be mocked. Its violations are real, never "known false positives".
 
 **If `CONTRACT_EXIT` is non-zero (violations found):**
 
@@ -462,7 +485,11 @@ Mechanical post-Coder check — catches a testid the Coder dropped, or tests tha
 were edited after the reviewer already passed them, before spending a sandbox run.
 
 ```bash
-bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}" --code
+if [ -f "runs/{RUN_ID}/contract.json" ]; then
+  python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" code
+else
+  bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}" --code   # older runs
+fi
 CODE_CONTRACT_EXIT=$?
 ```
 
@@ -479,7 +506,8 @@ run `/resume-orchestration {RUN_ID} --from tester` once you've decided how to pr
 Whatever was already committed this pass is on `{BRANCH}` in {REPO}."
 Do not continue, and do not retry automatically.
 
-**If violations only include `MISSING_TESTID_IN_CODE` (no test-edit violation):**
+**If the violations are only Coder defects** (`MISSING_TESTID_IN_CODE`, `MISSING_EXPORT`,
+`EXISTING_TESTID_REMOVED`; no test-edit violation):
 
 This is a Coder defect, not a test problem — route back to the Coder without
 spending a sandbox run. Append the violations to `runs/{RUN_ID}/report.md` under:

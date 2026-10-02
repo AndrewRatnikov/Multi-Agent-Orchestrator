@@ -25,7 +25,7 @@ Read:
 3. `runs/{RUN_ID}/prd.md`: the original acceptance criteria
 4. `{REPO}/.claude/rules/*.md`, if present: environment gotchas that make a test fail or pass for reasons unrelated to the feature
 
-**Contract compliance was already verified by `check-contract.sh`** (testids and imports vs the contract, packages vs `package.json`, banned patterns). Don't re-litigate those. Your checklist is judgment calls only.
+**Contract compliance was already verified mechanically** (`check-contract.py` against `contract.json`: testids, imports, packages, banned patterns). Don't re-litigate those. Your checklist is judgment calls only.
 
 ## Checklist
 

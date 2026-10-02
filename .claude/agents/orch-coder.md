@@ -27,7 +27,8 @@ Read:
 1. `runs/{RUN_ID}/tests/`: the tests you must make pass
 2. `runs/{RUN_ID}/plan.md`: Interface Contract, approach, and the Files-changed table
 3. `runs/{RUN_ID}/repo-digest.md`
-4. `memory.md` sections `## Pipeline conventions`, `## Pipeline gotchas`, `## check-contract.sh known false positives`
+4. `memory.md` sections `## Pipeline conventions` and `## Pipeline gotchas`
+5. `runs/{RUN_ID}/contract.json`: the names a script will check your files against
 5. `{REPO}/.claude/rules/*.md`, if present, and `repo-notes/{basename of REPO}.md` if present
 6. The real current version of every file you MODIFY, from `{REPO}`
 
@@ -60,7 +61,7 @@ Create files under `runs/{RUN_ID}/code/`, mirroring the exact repo-relative path
 
 Self-review:
 - [ ] Every non-test Files-changed row has a file in `code/`, and there's nothing else in `code/`
-- [ ] Every path, export and testid matches the contract
+- [ ] Every path, export and testid matches the contract. A script checks, from `contract.json`: each `testids.new` id appears literally in its file; each template's fixed parts are in its file; each `exports` name (and `default` export) is exported from its file; and in files you modify, every `testids.existing` id is still there
 - [ ] MODIFY files are complete and preserve unrelated existing behaviour
 - [ ] No test file was touched
 - [ ] No unplanned dependency

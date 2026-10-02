@@ -42,6 +42,12 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 
 ## check-contract.sh known false positives
 
+> **Legacy (runs without `contract.json`).** Since 2026-10-02 the Architect writes
+> `runs/{RUN_ID}/contract.json` and `check-contract.py` checks against it exactly: pre-existing,
+> template, test-only and removed testids and same-run packages are declared there, so the
+> false positives below can't happen. Agents no longer read this section. Kept for resuming
+> old runs that still use `check-contract.sh`.
+
 <!-- Read by: Architect, Tester, Coder. Temporary: most of these go away when the contract moves to contract.json (rebuild step 3). -->
 
 The script greps `plan.md` and the test/code files with regexes, so these cases are expected. Handle them as described; don't retry an agent over them.

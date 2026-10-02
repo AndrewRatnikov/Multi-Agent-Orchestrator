@@ -51,7 +51,7 @@ If resuming from a step that writes an artifact that already exists, archive it 
 | Resuming from | Artifact to archive |
 |---------------|-------------------|
 | `product`     | `runs/{RUN_ID}/prd.md` → `archive/prd_before_resume_{timestamp}.md` |
-| `architect`   | `runs/{RUN_ID}/plan.md` → `archive/plan_before_resume_{timestamp}.md` |
+| `architect`   | `runs/{RUN_ID}/plan.md` → `archive/plan_before_resume_{timestamp}.md` (and `contract.json` → `archive/contract_before_resume_{timestamp}.json`) |
 | `tester`      | `runs/{RUN_ID}/tests/` → `archive/tests_before_resume_{timestamp}/` |
 | `coder`       | `runs/{RUN_ID}/code/` → `archive/code_before_resume_{timestamp}/` |
 
@@ -132,7 +132,7 @@ between a `test:` or `fix tests:` commit message).
 Then continue through test-reviewer → coder → sandbox → verify → done.
 
 ### If RESUME_FROM = `test-reviewer`
-Run Stage 4a first: `bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"`.
+Run Stage 4a first, exactly as in `run-orchestration.md` (`check-contract.py … tests` when `runs/{RUN_ID}/contract.json` exists, otherwise the old `check-contract.sh`).
 Apply the same mechanical-gate logic as in `run-orchestration.md` Stage 4a (violations route
 back to Tester with the retry cap; never invoke the LLM reviewer on a dirty contract check).
 If clean, run subagent `orch-test-reviewer` (Stage 4b) and record its RESULT as in `run-orchestration.md`.
@@ -148,7 +148,7 @@ Then commit each changed file to {REPO} exactly as in `run-orchestration.md` Sta
 Files-changed table that actually changed; `retry_count > 0` here, so every commit is
 a `fix:` commit).
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
-Then run Stage 5b (`check-contract.sh "{RUN_ID}" "{REPO}" --code`) exactly as in `run-orchestration.md` Stage 5b —
+Then run Stage 5b (`check-contract.py … code`, or `check-contract.sh … --code` for runs without contract.json) exactly as in `run-orchestration.md` Stage 5b —
 a `TESTS_MODIFIED_AFTER_REVIEW` violation is a hard stop, a `MISSING_TESTID_IN_CODE` violation routes back to
 the Coder (write the fix, commit it, re-check) without spending a sandbox run.
 Then run sandbox → verify → done (if clean and tests pass).
