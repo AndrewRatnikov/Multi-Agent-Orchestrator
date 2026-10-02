@@ -154,8 +154,8 @@ the Coder (write the fix, commit it, re-check) without spending a sandbox run.
 Then run sandbox → verify → done (if clean and tests pass).
 
 ### If RESUME_FROM = `sandbox`
-Read the test command from `runs/{RUN_ID}/repo-digest.md` (`## Test command` section).
-Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" "{TEST_CMD}" 120`
+Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" - 120` (it reads the Test command
+from `repo-digest.md` itself; never copy it by hand).
 Apply the same PASS/FAIL/TIMEOUT routing as in `run-orchestration.md` Stage 6. On PASS, continue with Stage 6b (Verify).
 
 **If exit code is 3 or any other unlisted code (ERROR):**

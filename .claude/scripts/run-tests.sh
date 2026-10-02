@@ -2,7 +2,15 @@
 # run-tests.sh — sandboxed test runner for the AI orchestration pipeline
 #
 # Usage:
-#   run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]
+#   run-tests.sh <repo_path> <run_id> [test_command|-] [timeout_seconds]
+#
+#   test_command "-" (or empty): read it from runs/{run_id}/repo-digest.md's
+#   "## Test command" section. This is the normal way to call it: the command is
+#   taken from the file mechanically, never copied by hand.
+#
+# Output: the full test output goes to runs/{run_id}/sandbox-logs/<timestamp>.log.
+# report.md only gets a short summary (PASS) or the tail of the output (FAIL),
+# plus the path of the full log.
 #
 # What it does:
 #   1. Creates a disposable git worktree at /tmp/orchestrator-sandbox-{run_id}
@@ -23,7 +31,7 @@ set -euo pipefail
 # ── Args ─────────────────────────────────────────────────────────────────────
 REPO_PATH="${1:?Usage: run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]}"
 RUN_ID="${2:?Usage: run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]}"
-TEST_CMD="${3:?Usage: run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]}"
+TEST_CMD="${3:--}"
 TIMEOUT="${4:-120}"
 
 ORCHESTRATOR_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -32,9 +40,39 @@ REPORT="$RUN_DIR/report.md"
 SANDBOX="/tmp/orchestrator-sandbox-$RUN_ID"
 OUTPUT_FILE="/tmp/orchestrator-output-$RUN_ID.txt"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+LOG_DIR="$RUN_DIR/sandbox-logs"
+LOG_FILE="$LOG_DIR/$(date -u +"%Y%m%dT%H%M%SZ").log"
+LOG_REL="runs/$RUN_ID/sandbox-logs/$(basename "$LOG_FILE")"
+
+# ── Resolve the test command ──────────────────────────────────────────────────
+# "-" means: read it from repo-digest.md. The section is a fenced block; take the
+# non-empty lines inside it that aren't fence markers, joined with " && ".
+if [ -z "$TEST_CMD" ] || [ "$TEST_CMD" = "-" ]; then
+  DIGEST="$RUN_DIR/repo-digest.md"
+  if [ ! -f "$DIGEST" ]; then
+    echo "ERROR: $DIGEST not found, so there is no Test command to run."
+    exit 3
+  fi
+  TEST_CMD=$(awk '/^## Test command/{f=1;next} /^## /{f=0} f' "$DIGEST" \
+    | grep -vE '^[[:space:]]*(```|~~~)' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' | awk 'BEGIN{ORS=""} NR>1{print " && "} {print}' || true)
+fi
+# Refuse anything that is obviously not a command, instead of "running" it and
+# reporting a FAIL that would cost the Coder a retry.
+case "$TEST_CMD" in
+  ""|UNKNOWN|'```'*|'~~~'*)
+    echo "ERROR: invalid Test command: '$TEST_CMD'. Fix repo-digest.md's '## Test command' section."
+    exit 3 ;;
+esac
 
 log_report() {
   echo "$1" >> "$REPORT"
+}
+
+# Lines worth keeping in report.md from a passing run: the runners' own summaries.
+summary_lines() {
+  grep -E '^[[:space:]]*(Test Files|Tests|Test Suites|Snapshots|Ran all test suites|# (pass|fail|tests))' "$1" \
+    | grep -v '^[[:space:]]*Tests[[:space:]]*$' | head -20
 }
 
 # ── Portable timeout: GNU timeout → gtimeout (brew coreutils) → perl fallback ──
@@ -207,6 +245,8 @@ EXIT_CODE=$?
 set -e
 
 TEST_OUTPUT=$(cat "$OUTPUT_FILE")
+mkdir -p "$LOG_DIR"
+{ echo "\$ $TEST_CMD"; echo; cat "$OUTPUT_FILE"; } > "$LOG_FILE"
 
 # ── Step 7: Classify result ───────────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 124 ]; then
@@ -218,6 +258,7 @@ if [ "$EXIT_CODE" -eq 124 ]; then
   echo "  Recommend: resume from test-reviewer (not coder) — the test itself may be broken."
 
   log_report "### Result: TIMEOUT"
+  log_report "Full output: \`$LOG_REL\`"
   log_report ""
   log_report "Tests did not complete within ${TIMEOUT}s."
   log_report "**Recommended action:** resume from \`test-reviewer\` — the hang is likely in the test, not the implementation."
@@ -234,9 +275,12 @@ elif [ "$EXIT_CODE" -eq 0 ]; then
 
   log_report "### Result: PASS"
   log_report ""
+  SUMMARY=$(summary_lines "$OUTPUT_FILE")
+  [ -z "$SUMMARY" ] && SUMMARY=$(tail -10 "$OUTPUT_FILE")
   log_report '```'
-  log_report "$TEST_OUTPUT"
+  log_report "$SUMMARY"
   log_report '```'
+  log_report "Full output: \`$LOG_REL\`"
 
 elif [ "$EXIT_CODE" -eq 127 ] || [ "$EXIT_CODE" -eq 126 ]; then
   RESULT="ERROR"
@@ -250,8 +294,9 @@ elif [ "$EXIT_CODE" -eq 127 ] || [ "$EXIT_CODE" -eq 126 ]; then
   log_report "**This is NOT a test result. Do not retry the Coder. Fix the environment.**"
   log_report ""
   log_report '```'
-  log_report "$TEST_OUTPUT"
+  log_report "$(tail -40 "$OUTPUT_FILE")"
   log_report '```'
+  log_report "Full output: \`$LOG_REL\`"
 
 else
   RESULT="FAIL"
@@ -262,10 +307,15 @@ else
 
   log_report "### Result: FAIL (exit code $EXIT_CODE)"
   log_report ""
-  log_report "**Recommended action:** resume from \`coder\` with the output below as \`--feedback\`."
+  log_report "**Recommended action:** re-run the Coder with this failure as \`FEEDBACK\`, and point it at the full log."
   log_report ""
+  log_report "Summary:"
   log_report '```'
-  log_report "$TEST_OUTPUT"
+  log_report "$(summary_lines "$OUTPUT_FILE")"
+  log_report '```'
+  log_report "Last 120 lines (full output: \`$LOG_REL\`):"
+  log_report '```'
+  log_report "$(tail -120 "$OUTPUT_FILE")"
   log_report '```'
 fi
 

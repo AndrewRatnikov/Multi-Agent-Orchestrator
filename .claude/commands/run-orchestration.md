@@ -515,11 +515,12 @@ Read `retry_count` from state.md.
 
 Update `runs/{RUN_ID}/state.md`: set `step: sandbox`, `status: running`.
 
-Read the test command from `runs/{RUN_ID}/repo-digest.md` (look for the `## Test command` section).
+`run-tests.sh` reads the test command from `runs/{RUN_ID}/repo-digest.md`'s `## Test command`
+section itself. Don't copy the command by hand: pass `-`.
 
 Run the sandbox:
 ```bash
-bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" "{TEST_CMD}" 120
+bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" - 120
 SANDBOX_EXIT=$?
 ```
 
@@ -544,7 +545,9 @@ Read `retry_count` from state.md.
 - If `retry_count < 2` → increment `retry_count`. Tell the user:
   "Tests failed. Retrying Coder with failure output as feedback (attempt {retry_count}/2)..."
 
-  Read the failure output from `runs/{RUN_ID}/report.md`.
+  The failure output is the latest sandbox entry in `runs/{RUN_ID}/report.md` (summary and the
+  last 120 lines); the complete output is in the log file it names (`runs/{RUN_ID}/sandbox-logs/`).
+  Put the summary and tail in `FEEDBACK` and add: "Full test output: {log path}". The Coder can read it.
   Archive current code:
   ```bash
   cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
@@ -554,6 +557,9 @@ Read `retry_count` from state.md.
   Then re-run Stage 6.
 
 **If exit code 3 or any other unlisted code (ERROR):**
+(This includes an invalid Test command: `run-tests.sh` refuses a blank, `UNKNOWN` or
+fenced value instead of running it. In that case the fix is `repo-digest.md`'s
+`## Test command` section, not the code; tell the user which.)
 STOP immediately. Update state.md: status: failed, pause_reason: sandbox-infrastructure-error.
 Tell the user the sandbox environment is broken and show the report entry. Mention
 that whatever was already committed is on `{BRANCH}` in {REPO}, untouched by this

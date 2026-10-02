@@ -40,7 +40,7 @@ Answer these from the digest and the real files, not from what's idiomatic:
 - Test framework, where tests live (e.g. colocated `page.test.tsx`), and the real test command
 - Existing similar code to mirror
 
-**Test command.** In a monorepo, `repo-digest.md`'s `## Test command` may say `UNKNOWN` or name only the root script. Replace it with the real per-workspace command. It must include every setup step that **any** suite it runs needs (see the target repo's rules, e.g. a `test-commands.md`). The sandbox runs that section verbatim.
+**Test command.** In a monorepo, `repo-digest.md`'s `## Test command` may say `UNKNOWN` or name only the root script. Replace it with the real per-workspace command. It must include every setup step that **any** suite it runs needs (see the target repo's rules, e.g. a `test-commands.md`). The sandbox reads that section mechanically: keep it as one fenced code block that contains only the command (several lines are joined with `&&`), with no prose inside the fence.
 
 ## Step 2: Ask clarifying questions (only if needed)
 
