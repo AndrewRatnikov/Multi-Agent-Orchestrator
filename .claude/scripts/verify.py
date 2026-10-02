@@ -104,9 +104,13 @@ FILE_HEADER = re.compile(r"^(\S*/)?[\w@.\-/]+\.(tsx?|jsx?|mjs|cjs|vue|py|css|jso
 
 
 def _norm_path(s, worktree):
+    # Regex first: tools often print the realpath (macOS: /private/var/... for tempfile's
+    # /var/...), and a literal replace of the non-real path would leave "/private<WT>".
+    s = re.sub(r"\S*orchestrator-(verify|sandbox)-[\w-]+", "<WT>", s)
     if worktree:
-        s = s.replace(worktree, "<WT>")
-    return re.sub(r"\S*orchestrator-(verify|sandbox)-[\w-]+", "<WT>", s)
+        for p in sorted({worktree, os.path.realpath(worktree)}, key=len, reverse=True):
+            s = s.replace(p, "<WT>")
+    return s
 
 
 def error_lines(text, worktree):
