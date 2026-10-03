@@ -58,6 +58,16 @@ stays right there on the branch for you to inspect. You can resume from any step
 /resume-orchestration run_20260626_143022 --from coder
 ```
 
+For changes made outside the pipeline (dependency updates, config tweaks, quick fixes),
+run only the Verify stage on a branch:
+
+```
+/verify-branch chore/deps-2026-10 --repo ~/Projects/coin-collector-companion
+```
+
+It compares the committed branch with the default branch (or `--base`) and reports the
+same table, failures, pre-existing failures and migration follow-ups as a pipeline run.
+
 ## Key design decisions
 
 - **Tests before code** — the coder gets an objective, machine-checkable target instead of reviewer vibes
