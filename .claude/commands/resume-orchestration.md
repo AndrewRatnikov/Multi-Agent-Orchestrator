@@ -30,7 +30,7 @@ Branch:  {target_branch} (from {original_branch})
 Step:    {step}
 Status:  {status}
 Paused:  {pause_reason}
-Retries: {retry_count}
+Retries: {retry_count} (render: {render_retries})
 ```
 
 Also show the last 20 lines of `runs/{RUN_ID}/report.md` so the user sees the most recent output.
@@ -54,6 +54,7 @@ If resuming from a step that writes an artifact that already exists, archive it 
 | `architect`   | `runs/{RUN_ID}/plan.md` → `archive/plan_before_resume_{timestamp}.md` (and `contract.json` → `archive/contract_before_resume_{timestamp}.json`) |
 | `tester`      | `runs/{RUN_ID}/tests/` → `archive/tests_before_resume_{timestamp}/` |
 | `coder`       | `runs/{RUN_ID}/code/` → `archive/code_before_resume_{timestamp}/` |
+| `render`      | `runs/{RUN_ID}/render-review.md` → `archive/render-review_before_resume_{timestamp}.md` (the `render/` captures are simply overwritten) |
 
 Run the archive command before overwriting. Skip if the artifact doesn't exist yet.
 
@@ -118,18 +119,18 @@ Execute the stages in order starting from RESUME_FROM. For each stage, follow th
 
 ### If RESUME_FROM = `product`
 Run subagent `orch-product` (with `ANSWERS` if Step 3c produced any), then handle its RESULT exactly as in `run-orchestration.md` Stage 1.
-Then continue through architect → tester → test-reviewer → coder → sandbox → verify → done.
+Then continue through architect → tester → test-reviewer → coder → sandbox → verify → render → done.
 
 ### If RESUME_FROM = `architect`
 Run subagent `orch-architect` (with `ANSWERS` if Step 3c produced any), then handle its RESULT exactly as in `run-orchestration.md` Stage 2.
-Then continue through tester → test-reviewer → coder → sandbox → verify → done.
+Then continue through tester → test-reviewer → coder → sandbox → verify → render → done.
 
 ### If RESUME_FROM = `tester`
 Run subagent `orch-tester` (with the latest contract-check violations or reviewer failures from `report.md` as `FEEDBACK`, if resuming after a rejection), then handle its RESULT exactly as in `run-orchestration.md` Stage 3, including the scope check.
 Then commit the tests to {REPO} exactly as in `run-orchestration.md` Stage 3's
 "Commit the tests to {REPO}" sub-step (reads `retry_count` from state.md to decide
 between a `test:` or `fix tests:` commit message).
-Then continue through test-reviewer → coder → sandbox → verify → done.
+Then continue through test-reviewer → coder → sandbox → verify → render → done.
 
 ### If RESUME_FROM = `test-reviewer`
 Run Stage 4a first, exactly as in `run-orchestration.md` (`check-contract.py … tests` when `runs/{RUN_ID}/contract.json` exists, otherwise the old `check-contract.sh`).
@@ -138,7 +139,7 @@ back to Tester with the retry cap; never invoke the LLM reviewer on a dirty cont
 If clean, run subagent `orch-test-reviewer` (Stage 4b) and record its RESULT as in `run-orchestration.md`.
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 4b.
 On PASS, stamp `runs/{RUN_ID}/.test_reviewer_passed_at` before continuing.
-Then continue through coder → sandbox → verify → done (if reviewer passes).
+Then continue through coder → sandbox → verify → render → done (if reviewer passes).
 
 ### If RESUME_FROM = `coder`
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
@@ -151,7 +152,7 @@ Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
 Then run Stage 5b (`check-contract.py … code`, or `check-contract.sh … --code` for runs without contract.json) exactly as in `run-orchestration.md` Stage 5b —
 a `TESTS_MODIFIED_AFTER_REVIEW` violation is a hard stop, a `MISSING_TESTID_IN_CODE` violation routes back to
 the Coder (write the fix, commit it, re-check) without spending a sandbox run.
-Then run sandbox → verify → done (if clean and tests pass).
+Then run sandbox → verify → render → done (if clean and tests pass).
 
 ### If RESUME_FROM = `sandbox`
 Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" - 120` (it reads the Test command
@@ -170,17 +171,27 @@ written in `run-orchestration.md`.
 
 ### If RESUME_FROM = `verify`
 Run Stage 6b exactly as in `run-orchestration.md` (`python3 .claude/scripts/verify.py "{REPO}" "{RUN_ID}"`),
-with the same exit-code routing, then Stage 7 on PASS.
+with the same exit-code routing, then Stage 6c (render) on PASS, then Stage 7.
+
+### If RESUME_FROM = `render`
+Run Stage 6c exactly as in `run-orchestration.md`: `node .claude/scripts/render-capture.mjs "{REPO}" "{RUN_ID}"`
+with the same exit-code routing (SKIPPED / INCOMPLETE / ERROR / captured), then the
+`orch-render-reviewer` subagent, then its PASS / FAIL routing with `render_retries`, then Stage 7.
+Use this after fixing a `render-incomplete` pause (for example the dev server or fixture), after
+fixing a render problem by hand, or after the user added the repo's render config. If the user
+wants the config read from another branch (the base predates it), they set
+`render_config_ref: {branch}` in `state.md`; log that in `report.md`. Everything before
+render is assumed done: this does not re-run Verify.
 
 ### If RESUME_FROM is unrecognised
-Tell the user valid values are: `product`, `architect`, `tester`, `test-reviewer`, `coder`, `sandbox`, `verify`.
+Tell the user valid values are: `product`, `architect`, `tester`, `test-reviewer`, `coder`, `sandbox`, `verify`, `render`.
 Stop.
 
 ---
 
 ## Completion
 
-When the pipeline completes (all tests pass), follow the same Stage 7 logic as
+When the pipeline completes (all tests pass and the render review is done or recorded as SKIPPED), follow the same Stage 7 logic as
 `run-orchestration.md`: update state.md to done, append to report.md, collect and
 report the `{ORIGINAL_BRANCH}..{BRANCH}` commit log (everything was already committed
 to {REPO} incrementally as each stage ran — there is nothing left to apply), add a

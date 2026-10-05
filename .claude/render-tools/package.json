@@ -1,0 +1,9 @@
+{
+  "name": "orchestrator-render-tools",
+  "private": true,
+  "description": "Pinned Playwright for .claude/scripts/render-capture.mjs. Orchestrator-side only; never added to target repos.",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

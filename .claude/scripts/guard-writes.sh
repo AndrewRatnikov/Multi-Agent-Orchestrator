@@ -2,7 +2,7 @@
 # PreToolUse hook for pipeline subagents: allows Write/Edit only inside the
 # artifact area that the given role owns. Exit 2 blocks the call, and stderr is
 # shown to the agent. Usage (from agent frontmatter):
-#   guard-writes.sh <product|architect|tester|coder>
+#   guard-writes.sh <product|architect|tester|coder|render-reviewer>
 #
 # This is a deterministic backstop for the "stay in your folder" rule that used
 # to live only in the prompts. Bash can still write files, so the orchestrator
@@ -34,6 +34,7 @@ case "$ROLE" in
   architect) PATTERNS=("^runs/run_[^/]+/plan\.md$" "^runs/run_[^/]+/repo-digest\.md$" "^runs/run_[^/]+/contract\.json$") ;;
   tester)    PATTERNS=("^runs/run_[^/]+/tests/.+") ;;
   coder)     PATTERNS=("^runs/run_[^/]+/code/.+") ;;
+  render-reviewer) PATTERNS=("^runs/run_[^/]+/render-review\.md$") ;;
   *) echo "guard-writes.sh: unknown role '$ROLE'" >&2; exit 2 ;;
 esac
 

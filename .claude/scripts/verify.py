@@ -489,6 +489,16 @@ def main():
             else:
                 config = default_config(wt.path)
                 generic = True
+            if not generic and "steps" not in config:
+                # A verify.json may carry only other sections (e.g. "render" for the render
+                # review). Without steps it would silently check nothing, so fall back to the
+                # generic lint/typecheck/build/test steps, and to the default install command
+                # unless the file sets its own.
+                defaults = default_config(wt.path)
+                config["steps"] = defaults["steps"]
+                config.setdefault("install", defaults["install"])
+                config_note = (config_note + " " if config_note else "") + \
+                    "`.claude/verify.json` has no `steps`, so the generic lint/typecheck/build/test defaults were used."
             steps = list(config.get("steps", []))
             standard = {re.sub(r"\s+", " ", s["run"]).strip() for s in steps}
             for cmd in plan_verify_commands(run_dir):

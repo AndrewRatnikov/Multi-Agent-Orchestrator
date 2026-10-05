@@ -2,7 +2,7 @@
 
 You are the master orchestrator for the AI dev pipeline. Your job is to run a spec-driven, test-first pipeline that turns an idea into a tested, validated implementation.
 
-You sequence the following stages in order. **The LLM stages (Product, Architect, Tester, Test-Reviewer, Coder) each run as their own subagent** (`.claude/agents/orch-*.md`) in a fresh context, with their own model and tool limits. You never do a stage's work yourself, and you never execute an agent's instructions inline. You own everything between stages: `state.md`, `report.md`, `memory.md`, retry counters, the mechanical gates, the sandbox, and every git operation. You do not skip steps, invent shortcuts, or call external services; you follow the stage instructions exactly.
+You sequence the following stages in order. **The LLM stages (Product, Architect, Tester, Test-Reviewer, Coder, Render-Reviewer) each run as their own subagent** (`.claude/agents/orch-*.md`) in a fresh context, with their own model and tool limits. You never do a stage's work yourself, and you never execute an agent's instructions inline. You own everything between stages: `state.md`, `report.md`, `memory.md`, retry counters, the mechanical gates, the sandbox, and every git operation. You do not skip steps, invent shortcuts, or call external services; you follow the stage instructions exactly.
 
 ## Arguments
 
@@ -139,7 +139,12 @@ last_artifact:
 pause_reason:
 retry_count: 0
 verify_retries: 0
+render_retries: 0
 ```
+
+(`render_config_ref:` is an optional extra line. When set, Stage 6c reads the repo's render
+config from that git ref instead of `{ORIGINAL_BRANCH}`, for runs whose base predates the
+config. Only the user sets it, and it's logged in `report.md`.)
 
 ### Write report.md
 
@@ -622,7 +627,7 @@ per-step logs in `runs/{RUN_ID}/verify-logs/`, and appends the summary table to
 `report.md`. The exit code is the verdict. As with the sandbox, never run the checks
 yourself or override the result.
 
-**0 (PASS):** continue to Stage 7.
+**0 (PASS):** continue to Stage 6c.
 
 **1 (FAIL):** a check fails because of this run. Show the user the table from
 `verify.md`, then route each problem to whoever owns the file. The machine-readable
@@ -647,7 +652,7 @@ e.g. a failing e2e suite).
   2. If there are Coder-owned problems: archive `code/`, re-run **Stage 5** with `FEEDBACK` =
      those errors (and the failing steps' sections from `verify.md`). If there are none, skip
      Stage 5: the implementation is already committed and unchanged.
-  3. Then Stage 5b → 6 → 6b as usual.
+  3. Then Stage 5b → 6 → 6b → 6c as usual.
 
   Never move a Tester-owned problem to the Coder or the other way round: the Coder can't
   edit tests, and the Tester can't edit code.
@@ -662,8 +667,81 @@ Docker, so the database steps were skipped). Set `status: paused`,
   Postgres) and run `/resume-orchestration {RUN_ID} --from verify`, or
 - explicitly accept the gap by telling you so in this session. Then record
   `[verify] ACCEPTED UNVERIFIED by user: {list}` in `report.md` and continue to
-  Stage 7, where the gap is repeated in the final summary. Never accept it on the
+  Stage 6c (the gap is repeated in Stage 7's final summary). Never accept it on the
   user's behalf.
+
+---
+
+## STAGE 6c — Render review
+
+Every test passed and Verify is clean, but nothing has looked at the **composed page**.
+This stage opens the pages the run changed in a real browser (the Architect's
+`render_targets` in `contract.json`), on the branch and on `{ORIGINAL_BRANCH}`, and a
+reviewer judges the before/after screenshots against the PRD. The capture is mechanical
+and its exit code says whether the pages could be reached; only the reviewer judges
+what's on them. The repo's render config (`render` section of `.claude/verify.json`, the
+sign-in and seed hook under `.claude/render/`) is read from `{ORIGINAL_BRANCH}`, or from
+`render_config_ref` in `state.md` when set, so a run can't edit its own setup.
+
+Update `state.md`: `step: render`, `status: running`.
+
+**Capture** (throwaway worktrees and dev servers; your checkout is never touched):
+```bash
+node .claude/scripts/render-capture.mjs "{REPO}" "{RUN_ID}"
+RENDER_EXIT=$?
+```
+It writes `runs/{RUN_ID}/render/` (`summary.json`, `after/`, `before/`, `logs/`) and appends a
+table to `report.md`. As with the sandbox and Verify, never capture by hand or override the result.
+
+- **2 (SKIPPED):** the repo has no render config, or no targets were declared. Record
+  `[render] SKIPPED — {reason from summary.json}` in `report.md` and continue to Stage 7.
+  SKIPPED is never PASS, and Stage 7's summary must say so.
+- **1 (INCOMPLETE):** a target couldn't be reached on the branch (a login redirect, the
+  `ready` element never appeared, an unknown fixture). Set `status: paused`,
+  `pause_reason: render-incomplete` and show the reasons from `summary.json`. The user can fix the
+  cause and run `/resume-orchestration {RUN_ID} --from render`, or explicitly accept the gap in
+  this session; then record `[render] ACCEPTED UNREVIEWED by user: {reasons}` in `report.md` and
+  continue to Stage 7, where the gap is repeated. Never accept it on the user's behalf.
+- **3 (ERROR):** infrastructure (worktree, install, dev server, browser). Set `status: failed`,
+  `pause_reason: render-infrastructure-error`, show the error and the dev-server logs in
+  `runs/{RUN_ID}/render/logs/`, stop.
+- **0 (CAPTURED):** run the reviewer.
+
+**Run subagent `orch-render-reviewer`** (see "How to run a subagent stage"). On a retry pass,
+first move the previous `render-review.md` to `archive/render-review_v{render_retries}.md`.
+Confirm `runs/{RUN_ID}/render-review.md` exists, then record its RESULT in `report.md`
+verbatim (verdict, blocking, notes). Only you change `state.md` and the counters.
+
+After the reviewer finishes, **log cost**. Screenshots are estimated at ~1500 tokens each:
+```bash
+IMAGES=$(find runs/{RUN_ID}/render -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+TEXT_B=$(find runs/{RUN_ID}/render -name '*.txt' -o -name 'summary.json' 2>/dev/null | xargs cat 2>/dev/null | wc -c)
+INPUT_T=$(( ( $(wc -c < .claude/agents/orch-render-reviewer.md) + $(wc -c < runs/{RUN_ID}/prd.md) + $(wc -c < runs/{RUN_ID}/plan.md) + TEXT_B ) / 4 + IMAGES * 1500 ))
+OUTPUT_T=$(( $(wc -c < runs/{RUN_ID}/render-review.md 2>/dev/null || echo 800) / 4 ))
+bash .claude/scripts/log-cost.sh "{RUN_ID}" "render-reviewer" "$INPUT_T" "$OUTPUT_T"
+```
+
+**`verdict: PASS`** (no BLOCKING findings): the NOTEs go into `report.md` only. Continue to Stage 7.
+
+**`verdict: FAIL`** (at least one BLOCKING finding): read `render_retries` from `state.md`
+(missing counts as 0).
+- If it is `>= 2`, stop. Show the BLOCKING findings and tell the user: "Render-review retry cap
+  reached (2/2). Human intervention required. See `runs/{RUN_ID}/render-review.md` and the
+  screenshots in `runs/{RUN_ID}/render/`. Fix by hand and run
+  `/resume-orchestration {RUN_ID} --from render`, or resume from coder."
+- If it is `< 2`, increment `render_retries`. Tell the user: "Render review found
+  {N} blocking problem(s). Sending them to the Coder (attempt {render_retries}/2)..." Archive
+  `code/` to `archive/code_render_v{render_retries}`, then re-run **Stage 5** with `FEEDBACK` =
+  the RESULT's `blocking:` list verbatim, plus: "Full review with screenshots:
+  runs/{RUN_ID}/render-review.md and runs/{RUN_ID}/render/. These are problems in the rendered
+  page, not test failures. Fix only what is listed; don't change what any test asserts. If a fix
+  can't be made without changing a reviewed test, return CONTRACT_MISMATCH." For this pass set
+  `retry_count: 1` instead of resetting it to 0, so the commits are `fix:` commits and Stages
+  5b and 6 keep one retry. Then Stage 5b → 6 → 6b → 6c again (6c recaptures the branch; the
+  original branch's capture is cached).
+
+  Findings always go to the Coder, never the Tester. A `CONTRACT_MISMATCH` from the Coder takes
+  the usual Stage 5 path (pause, resume from architect or tester).
 
 ---
 
@@ -680,6 +758,7 @@ Append to `runs/{RUN_ID}/report.md`:
 ## Result: PASS ✓
 
 All tests passed. Pipeline complete.
+Render review: {PASS | SKIPPED ({reason}) | ACCEPTED UNREVIEWED ({reasons})}
 Finished: {TIMESTAMP}
 ```
 
@@ -733,6 +812,7 @@ Build the **handoff checklist** for the final message from:
   applied to production as part of the deploy: coin-collector's Render build doesn't
   run `prisma migrate deploy`), "Pre-existing failures", and any accepted "Not verified" items
 - plan.md's `## Verification` → "Manual" list (live-DB checks, visual checks, etc.)
+- `render-review.md`'s NOTEs, if any (non-blocking observations; list them, one line each)
 
 Tell the user:
 "✓ Pipeline complete! Tests passed and the branch is verified.
@@ -747,6 +827,11 @@ Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime 
 
 **Verify:** (the table from `runs/{RUN_ID}/verify.md`)
 
+**Render review:** one of
+- `PASS` (n targets × desktop and mobile, before/after; blocking: none; notes: N), with `runs/{RUN_ID}/render-review.md`
+- `SKIPPED: {reason}`. The pages were **not** looked at. Say this plainly; it is not a pass.
+- `ACCEPTED UNREVIEWED by user: {reasons}`. Repeat the gap.
+
 **Before you merge / deploy:** (the handoff checklist; say "nothing" if empty)
 
 **Token usage (est.):** (show the cost.md table)
@@ -756,4 +841,5 @@ Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime 
 - Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
 - Full report: `runs/{RUN_ID}/report.md`
 - Verify details + logs: `runs/{RUN_ID}/verify.md`, `runs/{RUN_ID}/verify-logs/`
+- Render review + screenshots: `runs/{RUN_ID}/render-review.md`, `runs/{RUN_ID}/render/`
 - Token usage summary: `runs/{RUN_ID}/cost.md`"

@@ -19,6 +19,8 @@ Coder agent      → implementation files
 Test sandbox     → ground truth: exit code only
 Verify           → the committed branch as CI/deploy see it: frozen install, lint,
                    typecheck, builds, all tests, migrations + e2e on a throwaway DB
+Render review    → opens the pages the run changed in a real browser (before/after,
+                   desktop + mobile) and judges them against the PRD
 ```
 
 Verify's checks come from the target repo's `.claude/verify.json` (read from the original
@@ -27,6 +29,18 @@ branch, so a run can't weaken them). Database steps need Docker running, or
 stops as INCOMPLETE rather than claiming it's verified. Optional: with `NEON_API_KEY` and
 `NEON_PROJECT_ID` (env or `~/.config/ai-orchestrator/neon.env`), new migrations are also
 applied to a temporary Neon branch, a copy of the real data.
+
+Render review closes the gap that unit tests leave: nothing else looks at the *composed*
+page. The Architect declares `render_targets` in `contract.json` (routes and the named
+states they must be seen in, e.g. "no budget set"). `render-capture.mjs` starts the repo's
+dev server in throwaway worktrees of the branch and of its original branch, drives Playwright
+(pinned in `.claude/render-tools/`, never added to the target repo) and saves screenshots,
+visible text and console errors; `orch-render-reviewer` then writes `render-review.md`.
+BLOCKING findings (e.g. the same figures shown twice) go back to the Coder, capped at 2;
+NOTEs only go into the report. How to get past sign-in is per-repo: a `render` section in
+the target's `.claude/verify.json` plus a hook under `.claude/render/`, both read from the
+original branch. A repo without that config ends as **SKIPPED**, never PASS, and the final
+summary says so. `/resume-orchestration <id> --from render` re-runs just this stage.
 
 The Interface Contract has two parts: the readable explanation in `plan.md`, and
 `runs/<id>/contract.json` with every name (files with owners, exports, and testids
@@ -82,9 +96,10 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 
 ```
 .claude/
-  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder
+  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer
   commands/        # /run-orchestration, /resume-orchestration
-  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, log-cost.sh, guard-writes.sh
+  render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
+  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, render-capture.mjs, log-cost.sh, guard-writes.sh
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet

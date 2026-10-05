@@ -31,6 +31,8 @@ Read all of these before writing anything:
 5. `repo-notes/{basename of REPO}.md` in this project, if present (notes for repos without rules yet)
 6. `{REPO}/CLAUDE.md`, if present: the architecture, data model and scope-discipline sections. Skip long historical changelog sections.
 7. The real source files the plan touches, and one or two similar existing files as a style reference
+8. If the task touches UI: the repo's render config, to learn which named states (fixtures) the render review can reach:
+   `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, the render review will be SKIPPED for this repo: still declare targets, they cost nothing.
 
 ## Step 1: Ground yourself in the repo
 
@@ -101,6 +103,16 @@ The single source of truth for all names. The Tester and Coder read this; neithe
 (Repeat for each component, function, endpoint or DTO.)
 
 
+## Render targets
+
+(Only when the task touches UI; otherwise omit this section. After Verify, the pipeline opens each
+route below in a real browser, in the named state, at desktop and mobile width, on this branch and
+on the original branch, and a reviewer compares the screenshots with the PRD.)
+
+| Id | Route | State | Fixture | Ready (testid) | What to look for |
+|----|-------|-------|---------|----------------|------------------|
+| dashboard-no-budget | / | no-budget | no-budget | dashboard-summary | income, expenses, net each shown once |
+
 ## Acceptance criteria coverage
 
 | Criterion | Satisfied by |
@@ -156,7 +168,11 @@ if a name isn't in contract.json, the Tester can't use it and the Coder isn't he
     "test_only": [],
     "removed":   []
   },
-  "packages": {"added": []}
+  "packages": {"added": []},
+  "render_targets": [
+    {"id": "sets-missing-empty", "route": "/sets/example/missing", "state": "empty", "fixture": "empty-set",
+     "ready": "missing-page-root", "look_for": "empty-state message, no blank table"}
+  ]
 }
 ```
 
@@ -177,6 +193,13 @@ Rules:
 - **testids.test_only**: ids that exist only inside test fixtures (e.g. a fake component in a
   `vi.mock` factory). **removed**: ids this run deletes, which tests may assert are gone.
 - **packages.added**: dependencies this run adds (and then the package.json is in `files`).
+- **render_targets** (any task that creates or modifies a `.tsx` / `.jsx` / `.vue` / `.svelte` / `.css` / `.html` file; the validator rejects such a contract without them): the pages and states the change **affects**, not just the page it is mainly about. A component that is used by several pages needs a target per page that shows it. A page that renders differently depending on data needs **one target per state** (for the dashboard: no budget set, budget set, and so on). It's states like these that unit tests of the parts never see together.
+  - `id`: unique lowercase slug. `route`: a path starting with `/` (query string allowed). `state`: slug naming the state.
+  - `fixture`: the named state to put the app in, one of the repo's `render.fixtures` keys. If the state you need isn't one of them, pick the closest and say in `look_for` what differs; never invent a fixture name (the validator checks it against the repo).
+  - `ready`: a testid that is on the page once it has rendered in that state (declare it in `testids`). It proves the capture reached the right page instead of a login or error screen.
+  - `look_for`: one line telling the reviewer what matters in this state.
+  - If a UI file changes but there is truly nothing to open in a browser (a component no page renders yet), set `"render_skip_reason": "…"` instead, and say why.
+  - plan.md's `## Render targets` table must list the same targets.
 
 Then run the validator yourself (read-only, safe) and fix anything it reports:
 ```bash
@@ -190,6 +213,7 @@ python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
 - [ ] The contract names every selector, export, prop and path a test will need
 - [ ] Every PRD acceptance criterion appears in the coverage table
 - [ ] `contract.json` lists the same files as the Files changed table, and every testid, export and new package the plan mentions; `check-contract.py … validate` is clean
+- [ ] If the task touches UI: `render_targets` has one target per route **and per data state** the change affects (every route that renders a changed component; every branch such as "no data" / "has data" / "over limit"), each with a real fixture and a declared `ready` testid, and plan.md's `## Render targets` matches
 - [ ] Path aliases match the workspace member's tsconfig
 - [ ] Any new dependency is justified and listed in Files changed (`package.json` MODIFY)
 - [ ] The Test command in `repo-digest.md` is real and includes the setup steps from the target repo's rules

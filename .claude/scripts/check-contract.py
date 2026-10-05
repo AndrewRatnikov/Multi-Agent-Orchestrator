@@ -33,13 +33,19 @@ contract.json (written by the Architect):
     "test_only": ["mock-chart"],               # only inside test fixtures / vi.mock factories
     "removed":   ["language-switcher-en"]      # removed by this run; tests may assert absence
   },
-  "packages": {"added": ["cookie-parser"]}     # new dependencies this run adds to a package.json
+  "packages": {"added": ["cookie-parser"]},    # new dependencies this run adds to a package.json
+  "render_targets": [                          # optional; pages the render review will open
+    {"id": "dashboard-no-budget", "route": "/", "state": "no-budget",
+     "fixture": "no-budget", "ready": "dashboard-summary", "look_for": "income shown once"}
+  ],
+  "render_skip_reason": ""                     # alternative to render_targets for a UI change with nothing to render
 }
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
 
 BUILTINS = set("""assert assert/strict async_hooks buffer child_process cluster console constants crypto
@@ -326,12 +332,114 @@ def schema_errors(data):
     for e in data.get("exports") or []:
         if not isinstance(e, dict) or not e.get("file"):
             errs.append("SCHEMA: exports entries need `file`: {}".format(json.dumps(e)))
+    errs += render_schema_errors(data)
     return errs
+
+
+SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def render_schema_errors(data):
+    errs = []
+    rt = data.get("render_targets")
+    if rt is None:
+        rt = []
+    if not isinstance(rt, list):
+        return ["SCHEMA: `render_targets` must be a list"]
+    if not isinstance(data.get("render_skip_reason", ""), str):
+        errs.append("SCHEMA: `render_skip_reason` must be a string")
+    ids, pairs = set(), set()
+    for i, t in enumerate(rt):
+        if not isinstance(t, dict):
+            errs.append("SCHEMA: render_targets[{}] must be an object".format(i)); continue
+        tid, route, state = t.get("id"), t.get("route"), t.get("state")
+        if not isinstance(tid, str) or not SLUG.match(tid):
+            errs.append("SCHEMA: render_targets[{}].id must be a lowercase slug (a-z, 0-9, -): {}".format(i, json.dumps(tid)))
+        elif tid in ids:
+            errs.append("SCHEMA: render_targets id {} is declared twice".format(tid))
+        ids.add(tid)
+        if not isinstance(route, str) or not route.startswith("/") or route.startswith("//") \
+                or "://" in route or ".." in route.split("?")[0].split("/"):
+            errs.append("SCHEMA: render_targets[{}].route must be a path starting with a single / (query allowed, no scheme or ..): {}".format(i, json.dumps(route)))
+        if not isinstance(state, str) or not SLUG.match(state):
+            errs.append("SCHEMA: render_targets[{}].state must be a lowercase slug naming the state, e.g. no-budget: {}".format(i, json.dumps(state)))
+        if isinstance(route, str) and isinstance(state, str):
+            if (route, state) in pairs:
+                errs.append("SCHEMA: render_targets has (route {}, state {}) twice".format(route, state))
+            pairs.add((route, state))
+        for key in ("fixture", "ready", "look_for"):
+            if key in t and not isinstance(t[key], str):
+                errs.append("SCHEMA: render_targets[{}].{} must be a string".format(i, key))
+        if isinstance(t.get("ready"), str) and not re.match(r"^[\w\-:.]+$", t["ready"]):
+            errs.append("SCHEMA: render_targets[{}].ready must be a plain testid: {}".format(i, t["ready"]))
+    return errs
+
+
+UI_EXTS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".html")
+
+
+def touches_ui(c):
+    """Coder-owned, non-test UI files this run creates or modifies."""
+    out = []
+    for f in c.files:
+        p = f.get("path", "")
+        if f.get("owner") == "coder" and p.endswith(UI_EXTS) and not re.search(r"\.(test|spec)\.", p):
+            out.append(p)
+    return out
+
+
+def repo_render_fixtures(repo_path, run_dir):
+    """Names in the target repo's render.fixtures (read from the render config ref, like
+    render-capture.mjs does), or None when the repo has no render config."""
+    state = {}
+    sp = os.path.join(run_dir, "state.md")
+    if os.path.exists(sp):
+        for line in open(sp, encoding="utf-8"):
+            if ":" in line:
+                k, v = line.split(":", 1)
+                state[k.strip()] = v.strip()
+    ref = state.get("render_config_ref") or state.get("original_branch") or "HEAD"
+    r = subprocess.run(["git", "-C", repo_path, "show", "{}:.claude/verify.json".format(ref)],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if r.returncode != 0:
+        return None
+    try:
+        render = json.loads(r.stdout.decode("utf-8")).get("render")
+    except ValueError:
+        return None
+    if not isinstance(render, dict):
+        return None
+    return set((render.get("fixtures") or {}).keys())
+
+
+def check_render(c, repo, run_dir, plan_path):
+    v = []
+    targets = c.data.get("render_targets") or []
+    skip = (c.data.get("render_skip_reason") or "").strip()
+    ui = touches_ui(c)
+    if ui and not targets and not skip:
+        v.append("RENDER_TARGETS_MISSING: this run changes UI files ({}) but contract.json has no render_targets and no "
+                 "render_skip_reason. Declare each route and state the change affects (e.g. / in no-budget and with-budget), "
+                 "or give a render_skip_reason.".format(", ".join(ui[:4]) + (", ..." if len(ui) > 4 else "")))
+    if targets and skip:
+        v.append("RENDER_TARGETS_AND_SKIP: render_skip_reason is set but render_targets is not empty; use one or the other")
+    known = c.allowed_testids() - c.test_only - c.removed
+    fixtures = repo_render_fixtures(repo.path, run_dir) if targets else None
+    for t in targets:
+        if t.get("ready") and t["ready"] not in known:
+            v.append("RENDER_READY_UNKNOWN: render target {} waits for testid {}, which is not declared in contract.json testids".format(t["id"], t["ready"]))
+        if fixtures is not None and t.get("fixture") and t["fixture"] not in fixtures:
+            v.append("RENDER_FIXTURE_UNKNOWN: render target {} uses fixture {}, but the repo's render.fixtures only has: {}".format(
+                t["id"], t["fixture"], ", ".join(sorted(fixtures)) or "(none)"))
+    if targets and os.path.exists(plan_path):
+        if not re.search(r"^##\s+Render targets\b", open(plan_path, encoding="utf-8").read(), re.M):
+            v.append("RENDER_PLAN_SECTION_MISSING: contract.json has render_targets but plan.md has no `## Render targets` section")
+    return v
 
 
 # ── checks ───────────────────────────────────────────────────────────────────
 
-def check_validate(c, repo, plan_path):
+def check_validate(c, repo, plan_path, run_dir=None):
     v = []
     table = plan_files_table(plan_path)
     if table is None:
@@ -365,6 +473,8 @@ def check_validate(c, repo, plan_path):
         v.append("PACKAGE_ALREADY_PRESENT: {} is listed in packages.added but is already a dependency".format(pkg))
     if c.added_packages and not any(p.endswith("package.json") for p in c.paths):
         v.append("PACKAGE_JSON_NOT_IN_CONTRACT: packages.added is non-empty but no package.json is in contract.json files")
+    if run_dir:
+        v += check_render(c, repo, run_dir, plan_path)
     return v
 
 
@@ -538,7 +648,7 @@ def main():
     c, repo = Contract(data), Repo(os.path.abspath(repo_path))
 
     if mode == "validate":
-        v = check_validate(c, repo, os.path.join(run_dir, "plan.md"))
+        v = check_validate(c, repo, os.path.join(run_dir, "plan.md"), run_dir)
     elif mode == "tests":
         if not os.path.isdir(os.path.join(run_dir, "tests")):
             print("SETUP_ERROR: runs/{}/tests/ not found".format(run_id)); sys.exit(3)
