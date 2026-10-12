@@ -72,6 +72,9 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261007_212533 | 2026-10-07 | task: minima-spend Phase 1 safety net (write lock, never-overwrite-undecryptable + quarantine, query error states, BroadcastChannel sync, B1 range-scaled budget) | result: PASS (1 test-reviewer retry: Settings error tests missing; 1 coder retry: dashboard Link rendered before queries settled; render SKIPPED) | tokens: 190521 (est)
+- run_20261006_204152 | 2026-10-06 | task: Show HTTP response headers in ReqLab response panel (Worker relays all upstream headers; Set-Cookie re-emitted as X-Upstream-Set-Cookie) | result: PASS | tokens: ~73k est
+- run_20261005_212015 | 2026-10-06 | task: CSV collection import (preview/resolve/confirm, pure parser+matcher, new collection-import API module, /collection/import page; no schema change) in coin-collector-companion | result: PASS (test-reviewer rejected once: wrong count in 2 page tests + no Ukrainian fixture rows; fixed in 1 Tester retry; render SKIPPED, repo has no render config) | tokens: 343113
 
 <!-- Brief log of completed runs. Injected into: curator only -->
 - run_20261001_224939 | 2026-10-02 | task: In-app admin role (Role enum + migration, DB-backed RolesGuard, set-user-role script), GET/PATCH /admin/coins with optional rejection reason, edit-before-approve, duplicate flag, and /admin/submissions review page + admin nav link in coin-collector-companion | result: PASS (Tester interrupted once by machine sleep, re-run from scratch; 1 verify retry for a plan grep matching comments; code-contract flagged 8 pre-existing site-nav testids, verified false positives; all 19 verify steps passed) | tokens: 227470 (est)
@@ -115,3 +118,18 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 - run_20261004_215444 | 2026-10-04 | task: home page duplicate month income/expenses/balance | result: PASS | tokens: | **TOTAL** | 21935 | 8008 | 29943 |
 
 - run_20261005_205735 | 2026-10-05 | task: Correct PR #4 fix — restore no-budget Income/Expenses/Net in the home top card, hide BudgetSummaryCard when no budget | result: PASS | tokens: 37539
+- run_20261005_215952 | 2026-10-06 | task: code review 2026-10-05 fixes (minima-spend) | result: PASS
+- run_20261006_215558 | 2026-10-06 | task: Show coin variety and link coin to catalog page in set views (own/canonical/public) in coin-collector-companion | result: PASS | tokens: 49849
+- run_20261007_220444 | 2026-10-07 | task: Phase 2 Vault v2 (minima-spend) | result: PASS | tokens: 153415 (est)
+- run_20261008_064656 | 2026-10-08 | task: Phase 3 No-account mode (minima-spend free-tier-spec) | result: PASS | tokens: ~276161 (est, excl. later retries)
+- run_20261008_080410 | 2026-10-08 | task: Phase 4 Backup (minima-spend free-tier-spec §6.2/§7/§8) | result: PASS | tokens: 424308 (est, incl. coder; excl. retry 1)
+- run_20261008_204753 | 2026-10-08 | task: Phase 5 Offline hardening (minima-spend) | result: PASS | tokens: | **TOTAL** | 38213 | 27074 | 65287 |
+- [active] Inline "```verify" mentions in plan.md prose are parsed by verify.py as fence openers and produce dozens of bogus FAIL steps; Architect must only use the literal fence for the real block. (added: run_20261008_204753)
+- run_20261009_211156 | 2026-10-09 | task: Album view on /sets/[id] (frontend only) | result: PASS | tokens: 106084 (est)
+- run_20261010_083926 | 2026-10-10 | task: Album view coin-card redesign (frontend only) | result: PASS | tokens: 161984 (est)
+- run_20261010_092310 | 2026-10-10 | task: Free-tier validation fixes (per-tab auto-lock, restore on recovery screens, unconfirmed recovery key, stronger key confirmation) | result: PASS | tokens: 308104 (est)
+- [active] repo-digest.sh with a long multi-paragraph task passes it as the "task hint" and emits ~90 junk lines under "Similar existing files"; trim that section before Stage 1 (or pass a short task string). (added: run_20261010_092310)
+- run_20261010_185645 | 2026-10-10 | task: income categories + analytics income donut (MinimaSpend) | result: PASS | tokens: | **TOTAL** | 246600 | 164817 | 411417 |
+- run_20261011_095624 | 2026-10-11 | task: Album view redesign per docs/design/2026-10-10_album-view.md (delta; most already on main) | result: PASS | tokens: 292398 (est)
+- run_20261011_105146 | 2026-10-11 | task: Catalog page redesign (filter sidebar, facets route, new catalog params) | result: PASS | tokens: 302372 (est)
+- [active] repo-digest.sh lists files under the target repo's .claude/worktrees/ and node_modules/ (stale agent worktrees), which crowds out the real file lists and leaves Test command UNKNOWN; strip them with grep -v before Stage 1. (added: run_20261011_105146)

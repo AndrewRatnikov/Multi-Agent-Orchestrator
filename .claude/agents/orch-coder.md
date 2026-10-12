@@ -66,6 +66,7 @@ Self-review:
 - [ ] No test file was touched
 - [ ] No unplanned dependency
 - [ ] Known gotchas from the repo's rules were respected
+- [ ] Every place the code departs from plan.md (its Approach, Interface Contract or `## Decisions`) is listed under `deviations`
 
 ## Finish
 
@@ -75,4 +76,13 @@ status: DONE
 files:
 - {repo-relative path} ({CREATE|MODIFY})
 notes: {environment issues suspected, unplanned-dependency flags, or "none"}
+deviations:
+- {what differs from plan.md}: {why} (e.g. "cross-month move writes the new chunk first, not
+  the old one: a crash then duplicates instead of losing the record")
 ```
+
+`deviations` lists every place your code does something other than what plan.md describes:
+a different approach, order of operations, data shape, limit or library, or a decision from
+`## Decisions` you couldn't follow. Write `deviations: none` when there are none. Renames
+and formatting don't count. This list is the ADR stage's only record of choices made after
+planning, so a missing deviation means the repo's ADR describes code that doesn't exist.

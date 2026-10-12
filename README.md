@@ -21,6 +21,8 @@ Verify           → the committed branch as CI/deploy see it: frozen install, l
                    typecheck, builds, all tests, migrations + e2e on a throwaway DB
 Render review    → opens the pages the run changed in a real browser (before/after,
                    desktop + mobile) and judges them against the PRD
+ADR writer       → records the decisions the run shipped as ADRs in the target repo's
+                   docs/adr/, committed on the branch with the code
 ```
 
 Verify's checks come from the target repo's `.claude/verify.json` (read from the original
@@ -41,6 +43,25 @@ NOTEs only go into the report. How to get past sign-in is per-repo: a `render` s
 the target's `.claude/verify.json` plus a hook under `.claude/render/`, both read from the
 original branch. A repo without that config ends as **SKIPPED**, never PASS, and the final
 summary says so. `/resume-orchestration <id> --from render` re-runs just this stage.
+
+Small tasks don't pay for the full ceremony. Right after the Architect, `size-run.py` sizes the
+run from `contract.json`: at most 3 code files, no new package, no sensitive path (schema,
+auth, crypto, dependencies, build config, plus the repo's own list in the `sizing` section of
+its `.claude/verify.json`), no user answers and no ADR-worthy decision make it **small**. A small
+run skips the LLM Test-Reviewer and runs the Tester and Coder on Sonnet; every mechanical gate
+(contract checks, sandbox, Verify, render review) still runs. The first sign of trouble (any
+retry, a contract mismatch, a failed gate) escalates it to standard, and the skipped review
+runs then. `--size small|full` overrides the rules.
+
+Decisions get written down where the code lives. The Architect reads the target repo's
+`docs/adr/` before planning (an accepted ADR binds it like a rule) and lists the plan's own
+decisions in a `## Decisions` section: options, why, what it supersedes. `check-adr.py plan`
+makes sure that section is there. After the render review, `orch-adr-writer` keeps the
+decisions that actually shipped and clear the bar (real alternatives, hard to reverse,
+a pattern, an accepted trade-off, or a contradiction of an existing doc), writes them as
+`docs/adr/YYYY-MM-DD-slug.md`, marks any ADR they supersede, and lists design docs that are
+now out of date for the handoff checklist. `check-adr.py adr` checks the files before they
+are committed as one `docs(adr)` commit. This stage never fails a run.
 
 The Interface Contract has two parts: the readable explanation in `plan.md`, and
 `runs/<id>/contract.json` with every name (files with owners, exports, and testids
@@ -96,7 +117,7 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 
 ```
 .claude/
-  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer
+  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
   commands/        # /run-orchestration, /resume-orchestration
   render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
   scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, render-capture.mjs, log-cost.sh, guard-writes.sh

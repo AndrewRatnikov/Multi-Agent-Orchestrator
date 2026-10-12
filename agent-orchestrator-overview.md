@@ -129,6 +129,28 @@ run_20260930_210012 (a dashboard redesign) passed every gate and still showed In
 - **SKIPPED is never PASS.** No render config, or no declared targets, ends as SKIPPED, and a page that can't be reached ends as INCOMPLETE (pause), the same spirit as Verify's INCOMPLETE. The final summary repeats both.
 - **Routing.** BLOCKING findings go to the Coder only, under their own `render_retries` cap (2), then 5b → 6 → 6b → 6c again. If a fix would need a reviewed test to change, the Coder returns CONTRACT_MISMATCH and the run pauses as usual; automatic routing to the Tester was deliberately not added (the Coder never edits tests, the Tester never edits code).
 
+### 12. ADRs — decisions are recorded in the target repo, by the pipeline
+In October 2026 we found that the reasons behind most recent changes in coin-collector-companion, MinimaSpend and ReqLab existed only in this project's `runs/*/plan.md`. The copies of plans into the target repos had stopped in August, and `docs/system-design_v2.md` still described decisions (no rate limiting, no admin role) that later runs had reversed. The 27 missing ADRs were backfilled by hand on 2026-10-11; the pipeline now writes them itself.
+
+- **Split between two stages.** The Architect knows *why* when it decides, so plan.md gets a `## Decisions` section (options, why, supersedes, ADR yes/no), checked mechanically by `check-adr.py plan`. But retries, user answers and Coder deviations can change a decision after planning, so the ADR itself is written at the end, by a new `orch-adr-writer` (Sonnet) in Stage 6d, from the decisions that survived into the diff.
+- **ADRs are input, not just output.** The Architect reads `{REPO}/docs/adr/` first; an accepted ADR binds it like a rule, and going against one must be recorded as a decision that supersedes it.
+- **A bar, not one ADR per run.** Real alternatives, hard to reverse, a pattern, an accepted trade-off, or a contradiction of an existing doc. Purely visual runs end with `NONE`.
+- **Date-named files** (`YYYY-MM-DD-slug.md`): parallel orchestrator branches can't collide on numbers.
+- **Supersession is explicit.** An old ADR gets only its Status line changed; a design doc that's now wrong is listed on the handoff checklist rather than edited by the agent.
+- **Choices made after planning are captured explicitly.** The Coder's RESULT has a `deviations` list (where the code departs from plan.md, and why); the orchestrator appends it to `runs/<id>/deviations.md`, which the writer treats as overriding the plan.
+- **Facts, not just shape.** `check-adr.py adr` also rejects an ADR whose `Code:` or `Supersedes:` line names a repo path that doesn't exist on the branch.
+- **Trivial runs skip the agent.** `check-adr.py trivial` (no decision marked for an ADR, no user answers, no deviations) lets the orchestrator record `NONE` without spawning the writer.
+- **Never blocks a run.** If the writer can't produce output that passes `check-adr.py adr` after one retry, the run still finishes and the handoff says `NOT WRITTEN`.
+
+### 13. Run size — small tasks skip LLM ceremony, never mechanical gates
+Every task used to go through all eight stages: a two-file change (run_20261004_215444) cost about 30k estimated tokens, three quarters of it in Product, Architect, Tester and Test-Reviewer before any code. Sizing can only be honest after the Architect, so `size-run.py` reads `contract.json` there.
+
+- **Rule, not judgement.** Small means at most 3 code files, no new package, no sensitive path, no user answers and no ADR-worthy decision. Back-tested on the 17 runs that have a contract.json: it picks the 10-04, 10-05 and 10-06 runs (all zero retries) and correctly leaves out the 4-file album card redesign of 10-10, which needed two retries.
+- **Sensitive paths are per repo**, in the `sizing` section of the target's `.claude/verify.json`, read from the original branch like the rest of it, on top of built-in defaults (schema, migrations, auth, crypto, dependencies, build/deploy config).
+- **Only LLM stages are trimmed.** No LLM Test-Reviewer; Sonnet for Tester and Coder. Contract checks, sandbox, Verify and the render review always run: the 10-04 run's real mistake was a product one that only the render review could have caught.
+- **Fail up.** The first retry, contract mismatch or failed gate turns the run standard for good, and the skipped test review runs before the retry. A wrong "small" costs one cheap attempt.
+- **Visible.** `size` and `size_reasons` live in state.md, the report and the final summary, and the run history line records it, so the thresholds can be tuned from real runs. The Product stage still always runs; sizing it is a possible next step.
+
 ## Honest competitive reality
 The supervisor/pipeline pattern itself is now table stakes — CrewAI, LangGraph, Claude Agent SDK, and others all support some version of staged delegation. Your differentiator is the **specific pipeline shape** (PRD → plan → tests-before-code → multi-stage review) plus **dual portability** (same agent defs run via your CLI or drop into Claude Code), not the existence of multiple agents.
 

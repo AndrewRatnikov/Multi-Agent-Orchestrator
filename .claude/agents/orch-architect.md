@@ -30,6 +30,7 @@ Read all of these before writing anything:
 4. `{REPO}/.claude/rules/*.md`, if present: the target repo's conventions and known gotchas. **These override anything generic.**
 5. `repo-notes/{basename of REPO}.md` in this project, if present (notes for repos without rules yet)
 6. `{REPO}/CLAUDE.md`, if present: the architecture, data model and scope-discipline sections. Skip long historical changelog sections.
+6b. `{REPO}/docs/adr/README.md`, if present, and every ADR it lists that touches the area of this task. **An `Accepted` ADR is a decision the repo already made: follow it like a rule.** If this task needs to go against one, that is itself a decision: record it under `## Decisions` with the ADR in `Supersedes`, and say why in `Why`.
 7. The real source files the plan touches, and one or two similar existing files as a style reference
 8. If the task touches UI: the repo's render config, to learn which named states (fixtures) the render review can reach:
    `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, the render review will be SKIPPED for this repo: still declare targets, they cost nothing.
@@ -138,6 +139,24 @@ Manual (can't be automated safely; these go into the handoff checklist):
 - e.g. apply migration `2026..._add_x` to production before deploying
 - e.g. check the new page visually at /settings on mobile width
 
+## Decisions
+
+(The decisions this plan makes, for the ADR stage at the end of the run. Record a decision
+when there were real alternatives, when it's hard to reverse (schema, public API, data
+format, security boundary), when it sets a pattern later work must follow, when it's a
+trade-off the user accepted in `ANSWERS`, or when it goes against an accepted ADR or a
+design doc. Every user answer that changed the design gets an entry. Don't record
+naming, styling or test-only choices.)
+
+### D1: {the decision, one sentence}
+- **Source:** {user answer (answers-product.md Q3) | architect | spec gap}
+- **Options:** {the option chosen; each real alternative, and why it lost}
+- **Why:** {the reason, in a sentence or two}
+- **Supersedes:** {`docs/adr/YYYY-MM-DD-slug.md`, or `docs/x.md` §n, or none}
+- **ADR:** {yes | no: why it doesn't need one}
+
+(Or, when the plan makes no such decision, a single line: `None: {why}`.)
+
 ## Risks and open questions
 ````
 
@@ -218,6 +237,8 @@ python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
 - [ ] Any new dependency is justified and listed in Files changed (`package.json` MODIFY)
 - [ ] The Test command in `repo-digest.md` is real and includes the setup steps from the target repo's rules
 - [ ] Nothing contradicts the target repo's rules or CLAUDE.md scope discipline
+- [ ] Nothing contradicts an accepted ADR in `{REPO}/docs/adr/`, unless `## Decisions` records it with `Supersedes`
+- [ ] `## Decisions` has an entry for every user answer that changed the design, or the line `None: …`; `python3 .claude/scripts/check-adr.py "{RUN_ID}" plan` is clean
 - [ ] `## Verification` lists the task's own checks (automated ones in the ```verify block, everything touching real data or production under Manual). If the task comes from a backlog doc with verification steps, every one of them appears in one of the two lists
 
 ## Step 5: Finish

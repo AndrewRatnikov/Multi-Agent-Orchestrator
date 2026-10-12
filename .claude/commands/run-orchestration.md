@@ -2,7 +2,7 @@
 
 You are the master orchestrator for the AI dev pipeline. Your job is to run a spec-driven, test-first pipeline that turns an idea into a tested, validated implementation.
 
-You sequence the following stages in order. **The LLM stages (Product, Architect, Tester, Test-Reviewer, Coder, Render-Reviewer) each run as their own subagent** (`.claude/agents/orch-*.md`) in a fresh context, with their own model and tool limits. You never do a stage's work yourself, and you never execute an agent's instructions inline. You own everything between stages: `state.md`, `report.md`, `memory.md`, retry counters, the mechanical gates, the sandbox, and every git operation. You do not skip steps, invent shortcuts, or call external services; you follow the stage instructions exactly.
+You sequence the following stages in order. **The LLM stages (Product, Architect, Tester, Test-Reviewer, Coder, Render-Reviewer, ADR-Writer) each run as their own subagent** (`.claude/agents/orch-*.md`) in a fresh context, with their own model and tool limits. You never do a stage's work yourself, and you never execute an agent's instructions inline. You own everything between stages: `state.md`, `report.md`, `memory.md`, retry counters, the mechanical gates, the sandbox, and every git operation. You do not skip steps, invent shortcuts, or call external services; you follow the stage instructions exactly.
 
 ## Arguments
 
@@ -11,8 +11,10 @@ $ARGUMENTS
 ```
 
 Parse `$ARGUMENTS` as:
-- Everything before `--repo` is the **task description** (TASK)
+- Everything before `--repo` / `--size` is the **task description** (TASK)
 - `--repo <path>` is the **target repository path** (REPO), defaults to `$(pwd)`
+- `--size small|full` (optional) overrides the automatic run size decided after the Architect
+  (see "Run size"). Store it as `size_override` in `state.md`. Omit it to let the rules decide.
 
 If TASK is empty, ask the user what they want to build and wait for their answer.
 
@@ -48,6 +50,9 @@ Use this procedure for every stage below that says **Run subagent `orch-…`**.
    Follow your agent instructions. Finish with the RESULT block.
    ```
    Pass file contents only by path, never pasted in: the subagent reads them itself. That keeps your own context small and the stage's context clean.
+   **Model:** each agent runs on the model in its own definition, except on a **small** run
+   (`size: small` in `state.md`), where you pass `model: "sonnet"` for `orch-tester` and
+   `orch-coder`. See "Run size".
 2. **Wait for its final report.** Stages are strictly sequential: never start the next stage, or a second copy of this one, while it's still running.
 3. **Parse the `## RESULT` block** at the end of its report. If the block is missing or malformed, treat that as a stage failure: record it in `report.md` and stop. Don't guess the outcome from the prose.
 4. **Record it.** Append a line to `runs/{RUN_ID}/report.md`, e.g. `[{stage}] {status or verdict} — {summary}`, followed by any lists the RESULT block contains (files, failures, gaps). Subagents never write `state.md`, `report.md` or `memory.md`; you do.
@@ -61,6 +66,37 @@ Use this procedure for every stage below that says **Run subagent `orch-…`**.
    - Show the questions to the user and ask them to answer here.
    - If they answer in this session: save the answers to `runs/{RUN_ID}/answers-{stage}.md`, set `status: running`, and run the same subagent again with `ANSWERS`. Repeat if it asks again.
    - If the session ends first, `/resume-orchestration {RUN_ID} --from {stage}` picks it up (it reads the questions file).
+
+---
+
+## Run size
+
+Every run is **standard** until Stage 2 sizes it. Right after the Architect, `size-run.py`
+reads `contract.json` (what the run will actually touch) and marks the run **small** only when
+it changes at most 3 code files (tests don't count; a repo can set `max_files`), adds no
+package, touches no sensitive path (schema and migrations, auth, crypto, dependencies, build and
+deploy config, plus the repo's own list in the `sizing` section of its `.claude/verify.json`,
+read from `{ORIGINAL_BRANCH}`), the user answered no questions, and no decision in plan.md is
+marked for an ADR. `--size small|full` overrides the rules.
+
+A small run **keeps every mechanical gate**: the contract checks, the path check, the sandbox,
+Verify and the render review all run exactly as on a standard run. It only trims the LLM stages:
+- the Tester and the Coder run on Sonnet instead of Opus;
+- the LLM Test-Reviewer (Stage 4b) is skipped; the mechanical Stage 4a check still runs;
+- the ADR stage usually ends in its trivial skip.
+
+**Escalation (fail up).** A small run becomes standard for the rest of the run the first time
+anything goes wrong, before any retry starts:
+- Stage 4a sends the tests back to the Tester;
+- the Coder returns `CONTRACT_MISMATCH`, or Stage 5b or the path check sends it back;
+- the sandbox, Verify or the render review fails and routes work to the Tester or Coder.
+
+To escalate: set `size: standard` in `state.md`, append `escalated: {stage}: {one line why}` to
+`size_reasons`, and record `[size] ESCALATED to standard — {why}` in `report.md`. If Stage 4b was
+skipped, run it now on the tests already committed (as in Stage 4b, with `NOTE`: "This run was
+sized small and skipped this review; review the committed tests before the retry."), and stamp
+`.test_reviewer_passed_at` again on PASS. A FAIL there follows Stage 4b's normal retry rules.
+Then do the retry the stage asked for, with Opus. An escalated run never goes back to small.
 
 ---
 
@@ -140,6 +176,9 @@ pause_reason:
 retry_count: 0
 verify_retries: 0
 render_retries: 0
+size: pending
+size_override: {small | full | empty}
+size_reasons:
 ```
 
 (`render_config_ref:` is an optional extra line. When set, Stage 6c reads the repo's render
@@ -216,10 +255,25 @@ It checks `runs/{RUN_ID}/contract.json` against its schema, against plan.md's Fi
 table (they must list the same files), and against the repo: `create` files must not exist
 yet, `modify` files must, every `existing` testid must really be in the file it names, new
 testids must live in coder-owned files, and new packages need a `package.json` in the files.
-- Exit 0: continue.
-- Exit 1 or 3 (violations, or contract.json missing): re-run the Architect with them as
-  `FEEDBACK` ("Fix contract.json/plan.md so `check-contract.py validate` passes: {violations}").
-  At most 2 such retries; then stop and show the user the violations.
+Then check the plan's `## Decisions` section (the input for Stage 6d's ADRs):
+
+```bash
+python3 .claude/scripts/check-adr.py "{RUN_ID}" plan
+```
+
+- Both exit 0: continue.
+- Exit 1 or 3 from either (violations, or contract.json missing): re-run the Architect with them as
+  `FEEDBACK` ("Fix contract.json/plan.md so `check-contract.py validate` and `check-adr.py plan` pass: {violations}").
+  At most 2 such retries, counted together; then stop and show the user the violations.
+
+Once both are clean, **size the run** (mechanical, no LLM; see "Run size"):
+```bash
+python3 .claude/scripts/size-run.py "{RUN_ID}" "{REPO}"
+```
+Exit 0 is small, exit 1 is standard. Write the first line's value to `size` in `state.md` and the
+reason lines to `size_reasons`, and record `[size] {small|standard} — {reasons}` in `report.md`.
+Exit 3 (setup error): record it and treat the run as standard. Tell the user the size in one line
+together with the Interface Contract below.
 
 Update `state.md`: `step: tester`, `last_artifact: runs/{RUN_ID}/plan.md`, `timestamp`. Show the user the Interface Contract the subagent pasted below its RESULT block, and the Test command, so they can spot problems before the Tester runs.
 
@@ -359,6 +413,12 @@ Read `retry_count` from state.md.
 
 ### Stage 4b — LLM Test-Reviewer (judgment calls only: assertion quality, coverage)
 
+**Small run:** if `size: small` in `state.md`, skip this review. Record
+`[test-reviewer] SKIPPED — small run (mechanical check 4a passed)` in `report.md`, update
+`state.md` (`step: coder`, `status: running`), stamp the gate exactly as on PASS
+(`touch "runs/{RUN_ID}/.test_reviewer_passed_at"`) so Stage 5b still detects any later test edit,
+and continue to Stage 5. If the run escalates later, this review runs then (see "Run size").
+
 **Run subagent `orch-test-reviewer`** (see "How to run a subagent stage"). It runs in a fresh context with read-only tools, so it judges tests it did not write. If you came here from a Stage 6 timeout, pass that stage's note as `NOTE`.
 
 Record its RESULT in `report.md` verbatim (verdict, checklist, failures, contract gaps). **Only you change `state.md` and `retry_count`**; the reviewer never does. That keeps each rejection counted exactly once.
@@ -421,6 +481,12 @@ Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_co
   missing, an undeclared file, or a test file written by the Coder) are a Coder failure:
   append them to the report and treat them like a Stage 5b violation (Coder retry with
   them as `FEEDBACK`, same cap). Only when it's clean, commit as below. If its `notes` suspect an environment issue (Test command, generated client, shared build), surface that to the user; the fix may belong in `repo-digest.md`'s Test command, not in the code.
+
+**Deviations.** If the RESULT's `deviations` is anything but `none`, append it to
+`runs/{RUN_ID}/deviations.md` under a heading for this pass (`## Coder pass {retry_count}`,
+or `## Coder pass render-{render_retries}` on a render-review retry), verbatim, and to
+`report.md`. Never create the file for a pass with no deviations: Stage 6d treats an absent or
+empty file as "the code follows the plan".
 
 ### Commit each implemented file to {REPO}
 
@@ -694,14 +760,14 @@ It writes `runs/{RUN_ID}/render/` (`summary.json`, `after/`, `before/`, `logs/`)
 table to `report.md`. As with the sandbox and Verify, never capture by hand or override the result.
 
 - **2 (SKIPPED):** the repo has no render config, or no targets were declared. Record
-  `[render] SKIPPED — {reason from summary.json}` in `report.md` and continue to Stage 7.
+  `[render] SKIPPED — {reason from summary.json}` in `report.md` and continue to Stage 6d.
   SKIPPED is never PASS, and Stage 7's summary must say so.
 - **1 (INCOMPLETE):** a target couldn't be reached on the branch (a login redirect, the
   `ready` element never appeared, an unknown fixture). Set `status: paused`,
   `pause_reason: render-incomplete` and show the reasons from `summary.json`. The user can fix the
   cause and run `/resume-orchestration {RUN_ID} --from render`, or explicitly accept the gap in
   this session; then record `[render] ACCEPTED UNREVIEWED by user: {reasons}` in `report.md` and
-  continue to Stage 7, where the gap is repeated. Never accept it on the user's behalf.
+  continue to Stage 6d; Stage 7 repeats the gap. Never accept it on the user's behalf.
 - **3 (ERROR):** infrastructure (worktree, install, dev server, browser). Set `status: failed`,
   `pause_reason: render-infrastructure-error`, show the error and the dev-server logs in
   `runs/{RUN_ID}/render/logs/`, stop.
@@ -721,7 +787,7 @@ OUTPUT_T=$(( $(wc -c < runs/{RUN_ID}/render-review.md 2>/dev/null || echo 800) /
 bash .claude/scripts/log-cost.sh "{RUN_ID}" "render-reviewer" "$INPUT_T" "$OUTPUT_T"
 ```
 
-**`verdict: PASS`** (no BLOCKING findings): the NOTEs go into `report.md` only. Continue to Stage 7.
+**`verdict: PASS`** (no BLOCKING findings): the NOTEs go into `report.md` only. Continue to Stage 6d.
 
 **`verdict: FAIL`** (at least one BLOCKING finding): read `render_retries` from `state.md`
 (missing counts as 0).
@@ -742,6 +808,66 @@ bash .claude/scripts/log-cost.sh "{RUN_ID}" "render-reviewer" "$INPUT_T" "$OUTPU
 
   Findings always go to the Coder, never the Tester. A `CONTRACT_MISMATCH` from the Coder takes
   the usual Stage 5 path (pause, resume from architect or tester).
+
+---
+
+## STAGE 6d — ADR
+
+The change is final. This stage records the decisions it shipped as Architecture Decision
+Records in `{REPO}/docs/adr/`, committed on `{BRANCH}` so they're reviewed in the PR with
+the code. Sources: plan.md's `## Decisions`, the user's `answers-*.md`, and whatever
+`report.md` shows changed after planning, checked against the shipped diff. ADRs are named
+`YYYY-MM-DD-slug.md` (the run's date), so parallel branches never fight over numbers.
+
+**This stage never fails the run.** A missing ADR is a documentation gap, not a broken
+change: if it can't produce a clean result, record that and continue to Stage 7, which
+puts it on the handoff checklist.
+
+Update `state.md`: `step: adr`, `status: running`. If `runs/{RUN_ID}/adr/` exists from an
+earlier pass, move it to `archive/adr_v{n}/` first.
+
+**Skip the writer when there's nothing to record** (mechanical, no LLM):
+```bash
+python3 .claude/scripts/check-adr.py "{RUN_ID}" trivial
+```
+- Exit 0 (trivial: plan.md's `## Decisions` is `None` or all `ADR: no`, no `answers-*.md`, no
+  `deviations.md`): record `[adr] NONE — trivial run, writer not run` in `report.md` and
+  continue to Stage 7. No cost to log.
+- Exit 1 (it prints why it isn't trivial) or 3: run the writer.
+
+**Run subagent `orch-adr-writer`** (see "How to run a subagent stage").
+
+- **`status: NONE`:** record `[adr] NONE — {summary}` and its `skipped` list in `report.md`.
+  Continue to Stage 7.
+- **`status: DONE`:** run the scope check (step 5 of the procedure), then the mechanical check:
+  ```bash
+  python3 .claude/scripts/check-adr.py "{RUN_ID}" "{REPO}" adr
+  ```
+  - Exit 1 (violations): re-run the subagent once with them as `FEEDBACK` (archive `adr/`
+    first). If the second pass still fails, record `[adr] NOT WRITTEN — {violations}` in
+    `report.md` and continue to Stage 7 without committing anything.
+  - Exit 3 (setup error): record it the same way and continue to Stage 7.
+  - Exit 0: copy the files in and commit them as one commit:
+    ```bash
+    cp -r "runs/{RUN_ID}/adr/." "{REPO}/"
+    git -C "{REPO}" add docs/adr
+    git -C "{REPO}" diff --cached --quiet || git -C "{REPO}" commit -m "docs(adr): {summary}
+
+    {one line per ADR: docs/adr/{file}}
+
+    Run: {RUN_ID}"
+    ```
+    Record the RESULT in `report.md` (`[adr] DONE`, then the `adrs`, `superseded`, `stale_docs`
+    and `skipped` lists).
+
+After the subagent finishes, **log cost**:
+```bash
+# Estimate: input = agent prompt + plan.md + prd.md + report.md + answers + existing ADRs; output = ADR files
+ADR_IN=$(cat runs/{RUN_ID}/answers-*.md "{REPO}"/docs/adr/*.md 2>/dev/null | wc -c)
+INPUT_T=$(( ( $(wc -c < .claude/agents/orch-adr-writer.md) + $(wc -c < runs/{RUN_ID}/plan.md) + $(wc -c < runs/{RUN_ID}/prd.md) + $(wc -c < runs/{RUN_ID}/report.md) + ADR_IN ) / 4 ))
+OUTPUT_T=$(( $(find runs/{RUN_ID}/adr -type f -exec cat {} + 2>/dev/null | wc -c) / 4 ))
+bash .claude/scripts/log-cost.sh "{RUN_ID}" "adr-writer" "$INPUT_T" "$OUTPUT_T"
+```
 
 ---
 
@@ -784,7 +910,7 @@ Every figure in it is a heuristic estimate (chars/4) of token usage, not a count
 
 Append a one-line entry to `memory.md` under `## Run history`:
 ```
-- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | tokens: {TOTAL_FROM_COST_MD}
+- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | size: {small|standard|small→standard} | tokens: {TOTAL_FROM_COST_MD}
 ```
 
 If this run surfaced a gotcha worth remembering (a naming convention, a config quirk,
@@ -813,6 +939,8 @@ Build the **handoff checklist** for the final message from:
   run `prisma migrate deploy`), "Pre-existing failures", and any accepted "Not verified" items
 - plan.md's `## Verification` → "Manual" list (live-DB checks, visual checks, etc.)
 - `render-review.md`'s NOTEs, if any (non-blocking observations; list them, one line each)
+- Stage 6d's `stale_docs` ("update {doc} §{section}: {what is now wrong}"), and `[adr] NOT WRITTEN`
+  if the ADR stage couldn't produce a clean result
 
 Tell the user:
 "✓ Pipeline complete! Tests passed and the branch is verified.
@@ -832,6 +960,12 @@ Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime 
 - `SKIPPED: {reason}`. The pages were **not** looked at. Say this plainly; it is not a pass.
 - `ACCEPTED UNREVIEWED by user: {reasons}`. Repeat the gap.
 
+**Run size:** `small` or `standard`, with the reasons from `size_reasons` (including any
+`escalated:` line, or the `--size` override).
+
+**ADRs:** the files Stage 6d committed (one line each: file and title), plus any it marked
+superseded; or `none ({reason})`; or `NOT WRITTEN` with the reason.
+
 **Before you merge / deploy:** (the handoff checklist; say "nothing" if empty)
 
 **Token usage (est.):** (show the cost.md table)
@@ -842,4 +976,5 @@ Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime 
 - Full report: `runs/{RUN_ID}/report.md`
 - Verify details + logs: `runs/{RUN_ID}/verify.md`, `runs/{RUN_ID}/verify-logs/`
 - Render review + screenshots: `runs/{RUN_ID}/render-review.md`, `runs/{RUN_ID}/render/`
+- ADRs as written (before commit): `runs/{RUN_ID}/adr/`
 - Token usage summary: `runs/{RUN_ID}/cost.md`"
