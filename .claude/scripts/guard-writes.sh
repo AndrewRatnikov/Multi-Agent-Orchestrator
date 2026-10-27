@@ -56,6 +56,27 @@ if [ "$REL" != "$REAL_TARGET" ]; then   # target is inside the orchestrator proj
       # The Coder edits MODIFY files in place (seed-code.py copied them into
       # code/). Re-typing a large existing file with Write costs its whole size
       # in output tokens, plus the same again in context on every later call.
+      # Generated files (runs/<run>/generated.json, written by regen.py) are
+      # rebuilt by their generator after the Coder's pass; the Coder never edits them.
+      if [ "$ROLE" = "coder" ]; then
+        GEN=$(REL="$REL" ROOT="$REAL_ROOT" /usr/bin/python3 -c '
+import json, os, re
+m = re.match(r"runs/(run_[^/]+)/code/(.+)$", os.environ["REL"])
+if m:
+    try:
+        data = json.load(open(os.path.join(os.environ["ROOT"], "runs", m.group(1), "generated.json")))
+        for e in data.get("files") or []:
+            if e.get("path") == m.group(2):
+                print(e.get("command") or "its generator")
+                break
+    except Exception:
+        pass
+')
+        if [ -n "$GEN" ]; then
+          echo "Blocked by pipeline write guard: $REL is a generated file (\`$GEN\`). Don't edit it: change its sources, and the orchestrator re-runs the generator after your pass." >&2
+          exit 2
+        fi
+      fi
       if [ "$ROLE" = "coder" ] && [ "$TOOL" = "Write" ] && [ -f "$REAL_TARGET" ]; then
         SIZE=$(wc -c < "$REAL_TARGET" | tr -d ' ')
         if [ "$SIZE" -gt "$MAX_REWRITE_BYTES" ]; then

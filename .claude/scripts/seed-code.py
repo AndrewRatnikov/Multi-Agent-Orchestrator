@@ -11,6 +11,9 @@ Files come from contract.json (`files` entries with action "modify" and owner
 "coder"); runs without contract.json fall back to plan.md's `## Files changed`
 table (non-test rows whose Action is MODIFY).
 
+It then runs `regen.py detect`, which lists the generated ones among them in
+runs/{RUN_ID}/generated.json (the Coder leaves those to their generator).
+
 A file that already exists under code/ is never overwritten: on a retry it is
 the Coder's previous version, which is also what is committed in {repo}.
 
@@ -93,6 +96,11 @@ def main():
         return 3
     print(f"seed-code: {len(seeded)} MODIFY file(s) copied into runs/{run_id}/code/ "
           f"({size // 1024} KB), {len(kept)} already there and kept (from {source})")
+    # Which of these files are generated (rebuilt by regen.py after the Coder, never edited):
+    # writes runs/{run_id}/generated.json, read by the Coder and the write guard.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import regen
+    regen.cmd_detect(repo, run_id)
     return 0
 
 

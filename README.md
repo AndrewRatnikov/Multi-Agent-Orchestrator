@@ -120,7 +120,7 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
   agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
   commands/        # /run-orchestration, /resume-orchestration
   render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
-  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, render-capture.mjs, run-usage.py, seed-code.py, guard-writes.sh
+  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, verify.py, render-capture.mjs, run-usage.py, seed-code.py, regen.py, guard-writes.sh
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet
