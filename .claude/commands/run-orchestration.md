@@ -444,6 +444,17 @@ Continue to Stage 5.
 Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_count: 0`.
 **Exception:** if you are re-entering this stage as a retry (from Stage 5b or Stage 6), do NOT reset `retry_count` — it must keep the value the retry logic just incremented, or the retry cap can never trip.
 
+**Seed the files the Coder modifies** (mechanical, before every Coder pass, first or retry):
+```bash
+python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"
+```
+It copies the current repo version of every Coder-owned MODIFY file (from `contract.json`) into
+`runs/{RUN_ID}/code/`, and never overwrites a file already there (on a retry that's the Coder's
+previous version, which is also what's committed). The Coder edits these copies in place instead
+of re-typing whole files. Exit 3 (a declared MODIFY file is missing from {REPO}): record it in
+`report.md`, set `status: paused`, `pause_reason: contract-mismatch`, and stop as for
+`CONTRACT_MISMATCH` below.
+
 **Run subagent `orch-coder`** (see "How to run a subagent stage"). On a retry, pass the sandbox failure output or check-contract violations as `FEEDBACK`.
 
 - `status: CONTRACT_MISMATCH` → append its `detail` to `report.md`, set `status: paused`, `pause_reason: contract-mismatch` in `state.md`, and handle it as described at the end of this stage (no commits for this pass).

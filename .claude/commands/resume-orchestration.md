@@ -150,7 +150,7 @@ Then continue through coder → sandbox → verify → render → adr → done (
 
 ### If RESUME_FROM = `coder`
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
-Run subagent `orch-coder` with `FEEDBACK: {LAST_FAIL_OUTPUT}`, then handle its RESULT exactly as in `run-orchestration.md` Stage 5, including the scope check and the Files-changed completeness check.
+Seed `code/` first (`python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"`, exactly as in `run-orchestration.md` Stage 5), then run subagent `orch-coder` with `FEEDBACK: {LAST_FAIL_OUTPUT}`, then handle its RESULT exactly as in `run-orchestration.md` Stage 5, including the scope check and the Files-changed completeness check.
 Then commit each changed file to {REPO} exactly as in `run-orchestration.md` Stage 5's
 "Commit each implemented file to {REPO}" sub-step (one commit per row in the plan's
 Files-changed table that actually changed; `retry_count > 0` here, so every commit is

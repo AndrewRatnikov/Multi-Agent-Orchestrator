@@ -30,7 +30,7 @@ Read:
 4. `memory.md` sections `## Pipeline conventions` and `## Pipeline gotchas`
 5. `runs/{RUN_ID}/contract.json`: the names a script will check your files against
 5. `{REPO}/.claude/rules/*.md`, if present, and `repo-notes/{basename of REPO}.md` if present
-6. The real current version of every file you MODIFY, from `{REPO}`
+6. The files you MODIFY: they are already in `runs/{RUN_ID}/code/`, copied from `{REPO}` by the orchestrator (on a retry, your previous version). Don't Read large ones whole: Grep for the symbols and sections you need and Read only those ranges (`offset`/`limit`)
 
 ## Strict rules
 
@@ -39,7 +39,7 @@ Read:
 3. **Path aliases consistent with the workspace member's tsconfig.**
 4. **Dependencies:** add only what the plan lists (as a `package.json` MODIFY row). Otherwise flag it in your summary and don't add it.
 5. **Real logic, not hard-coded returns.** Keep it minimal: make the tests pass, and follow the repo's rules.
-6. **MODIFY means the whole file.** The orchestrator copies `code/{file}` over the repo's file, so write the complete updated file, starting from the real current version.
+6. **MODIFY means edit the copy in place, never rewrite it.** Every MODIFY file is already in `code/` as an exact copy of the repo's current version, and the orchestrator copies `code/{file}` back over the repo's file. Change it with Edit, in targeted edits (group related changes into one Edit where they're close together); everything you don't touch stays byte-identical. Don't re-create a MODIFY file with Write: re-typing a large file costs its whole size in output and again in context on every later step, and the write guard blocks Write over an existing file larger than 8 KB. If Edit says the file hasn't been read yet, Read the lines around the change and retry. CREATE files are new: Write them whole.
 
 ## On a retry: logic error or contract mismatch?
 
@@ -57,12 +57,12 @@ recommendation: resume from architect to correct the contract
 
 ## Write the implementation
 
-Create files under `runs/{RUN_ID}/code/`, mirroring the exact repo-relative paths from the plan's Files-changed table (e.g. `code/apps/web/src/components/budget-summary.tsx`). Produce a file for every row in the table **except test files** (those are the Tester's; a script rejects test files in `code/`, and any file the table doesn't list).
+Work in `runs/{RUN_ID}/code/`, which mirrors the repo-relative paths from the plan's Files-changed table (e.g. `code/apps/web/src/components/budget-summary.tsx`). MODIFY rows are already there to edit; Write the CREATE rows. There must be a file for every row in the table **except test files** (those are the Tester's; a script rejects test files in `code/`, and any file the table doesn't list).
 
 Self-review:
 - [ ] Every non-test Files-changed row has a file in `code/`, and there's nothing else in `code/`
 - [ ] Every path, export and testid matches the contract. A script checks, from `contract.json`: each `testids.new` id appears literally in its file; each template's fixed parts are in its file; each `exports` name (and `default` export) is exported from its file; and in files you modify, every `testids.existing` id is still there
-- [ ] MODIFY files are complete and preserve unrelated existing behaviour
+- [ ] MODIFY files were changed with targeted Edits, not rewritten; unrelated existing behaviour is untouched
 - [ ] No test file was touched
 - [ ] No unplanned dependency
 - [ ] Known gotchas from the repo's rules were respected

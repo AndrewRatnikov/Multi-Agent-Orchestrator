@@ -23,6 +23,9 @@ if p and not os.path.isabs(p):
 print(os.path.normpath(p) if p else "")
 ')
 
+TOOL=$(printf '%s' "$INPUT" | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin).get("tool_name") or "")')
+MAX_REWRITE_BYTES=8000
+
 if [ -z "$TARGET" ]; then
   exit 0   # not a file-writing call we understand; let permissions decide
 fi
@@ -50,6 +53,16 @@ REL="${REAL_TARGET#"$REAL_ROOT"/}"
 if [ "$REL" != "$REAL_TARGET" ]; then   # target is inside the orchestrator project
   for pat in "${PATTERNS[@]}"; do
     if [[ "$REL" =~ $pat ]]; then
+      # The Coder edits MODIFY files in place (seed-code.py copied them into
+      # code/). Re-typing a large existing file with Write costs its whole size
+      # in output tokens, plus the same again in context on every later call.
+      if [ "$ROLE" = "coder" ] && [ "$TOOL" = "Write" ] && [ -f "$REAL_TARGET" ]; then
+        SIZE=$(wc -c < "$REAL_TARGET" | tr -d ' ')
+        if [ "$SIZE" -gt "$MAX_REWRITE_BYTES" ]; then
+          echo "Blocked by pipeline write guard: $REL already exists ($SIZE bytes). Don't rewrite it with Write; change it with Edit (targeted edits; Read only the lines around each change first). Write is allowed for new files and for existing files up to $MAX_REWRITE_BYTES bytes." >&2
+          exit 2
+        fi
+      fi
       exit 0
     fi
   done
