@@ -174,7 +174,10 @@ if [ ! -d "$SANDBOX/node_modules" ] && [ -f "$SANDBOX/package.json" ]; then
     (cd "$SANDBOX" && pnpm install --silent) \
       || { echo "ERROR: pnpm install failed."; log_report "**ERROR:** pnpm install failed in sandbox."; exit 3; }
   else
-    npm install --prefix "$SANDBOX" --silent 2>&1 | tail -5 \
+    # Run from inside the sandbox, not with --prefix: from another cwd, npm resolves the
+    # symlinked /tmp (macOS) as an external link and rewrites package-lock.json with
+    # "../../private/tmp/..." keys, which breaks any test that reads the lockfile.
+    (cd "$SANDBOX" && npm install --silent 2>&1 | tail -5; exit "${PIPESTATUS[0]}") \
       || { echo "ERROR: npm install failed."; log_report "**ERROR:** npm install failed in sandbox."; exit 3; }
   fi
   echo "Dependencies installed."

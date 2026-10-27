@@ -42,6 +42,7 @@ Use this procedure for every stage below that says **Run subagent `orch-…`**.
    ```
    ORCHESTRATOR_ROOT: {ORCHESTRATOR_ROOT}
    RUN_ID: {RUN_ID}
+   STAGE: orch-<stage>
    REPO: {REPO}
    TASK: {TASK}
    ANSWERS: {the user's answers, if re-running after NEEDS_INPUT}
@@ -49,6 +50,7 @@ Use this procedure for every stage below that says **Run subagent `orch-…`**.
    NOTE: {extra instruction from the stage, if any}
    Follow your agent instructions. Finish with the RESULT block.
    ```
+   Always include the `STAGE` line: `run-usage.py` uses it to attribute the subagent's tokens to its stage.
    Pass file contents only by path, never pasted in: the subagent reads them itself. That keeps your own context small and the stage's context clean.
    **Model:** each agent runs on the model in its own definition, except on a **small** run
    (`size: small` in `state.md`), where you pass `model: "sonnet"` for `orch-tester` and
@@ -222,14 +224,6 @@ Update `runs/{RUN_ID}/state.md`: set `step: product`, `status: running`.
 
 On `status: DONE`, confirm `runs/{RUN_ID}/prd.md` exists. Update `state.md`: `step: architect`, `last_artifact: runs/{RUN_ID}/prd.md`, `timestamp`. Tell the user the PRD is written, with the RESULT's one-sentence summary.
 
-After the Product agent finishes, **log cost**:
-```bash
-# Estimate: input = agent prompt + task description; output = prd.md
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-product.md) + ${#TASK} ) / 4 ))
-OUTPUT_T=$(( $(wc -c < runs/{RUN_ID}/prd.md 2>/dev/null || echo 400) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "product-agent" "$INPUT_T" "$OUTPUT_T"
-```
-
 - If the run is still paused for questions (the user didn't answer in this session): stop. Tell the user:
   "Pipeline paused at **product** stage. Answer the questions above (here, or later with
   `/resume-orchestration {RUN_ID} --from product`)."
@@ -276,14 +270,6 @@ Exit 3 (setup error): record it and treat the run as standard. Tell the user the
 together with the Interface Contract below.
 
 Update `state.md`: `step: tester`, `last_artifact: runs/{RUN_ID}/plan.md`, `timestamp`. Show the user the Interface Contract the subagent pasted below its RESULT block, and the Test command, so they can spot problems before the Tester runs.
-
-After the Architect agent finishes, **log cost**:
-```bash
-# Estimate: input = agent prompt + prd.md + repo-digest.md; output = plan.md
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-architect.md) + $(wc -c < runs/{RUN_ID}/prd.md) + $(wc -c < runs/{RUN_ID}/repo-digest.md) ) / 4 ))
-OUTPUT_T=$(( $(wc -c < runs/{RUN_ID}/plan.md 2>/dev/null || echo 800) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "architect-agent" "$INPUT_T" "$OUTPUT_T"
-```
 
 - If the run is still paused for questions: stop. Tell the user:
   "Pipeline paused at **architect** stage. Answer the questions above (here, or later with
@@ -346,14 +332,6 @@ Run: {RUN_ID}"
 Where `{MSG}` is:
 - `retry_count` is `0`: `test: {TASK}` (plus a short body: "Written test-first, before any implementation. Not yet reviewed — subject to the mechanical contract gate and the test-reviewer.")
 - `retry_count` is `>0`: `fix tests: {TASK} (retry {retry_count}/2)`
-
-After the Tester agent finishes, **log cost**:
-```bash
-# Estimate: input = agent prompt + plan.md; output = all test files combined
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-tester.md) + $(wc -c < runs/{RUN_ID}/plan.md) ) / 4 ))
-OUTPUT_T=$(( $(find runs/{RUN_ID}/tests -type f 2>/dev/null | xargs wc -c 2>/dev/null | tail -1 | awk '{print $1}' || echo 600) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "tester-agent" "$INPUT_T" "$OUTPUT_T"
-```
 
 Continue to Stage 4.
 
@@ -422,13 +400,6 @@ and continue to Stage 5. If the run escalates later, this review runs then (see 
 **Run subagent `orch-test-reviewer`** (see "How to run a subagent stage"). It runs in a fresh context with read-only tools, so it judges tests it did not write. If you came here from a Stage 6 timeout, pass that stage's note as `NOTE`.
 
 Record its RESULT in `report.md` verbatim (verdict, checklist, failures, contract gaps). **Only you change `state.md` and `retry_count`**; the reviewer never does. That keeps each rejection counted exactly once.
-
-After the Test-Reviewer finishes, **log cost**:
-```bash
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-test-reviewer.md) + $(find runs/{RUN_ID}/tests -type f 2>/dev/null | xargs wc -c 2>/dev/null | tail -1 | awk '{print $1}' || echo 600) + $(wc -c < runs/{RUN_ID}/plan.md) ) / 4 ))
-OUTPUT_T=300  # reviewer output is short (checklist + verdict)
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "test-reviewer" "$INPUT_T" "$OUTPUT_T"
-```
 
 **If `verdict: FAIL` (reviewer rejected the tests):**
 
@@ -529,14 +500,6 @@ git -C "{REPO}" add pnpm-lock.yaml
 git -C "{REPO}" diff --cached --quiet || git -C "{REPO}" commit -m "chore: update lockfile
 
 Run: {RUN_ID}"
-```
-
-After the Coder agent finishes, **log cost**:
-```bash
-# Estimate: input = agent prompt + plan.md + all tests + repo-digest.md; output = all code files
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-coder.md) + $(wc -c < runs/{RUN_ID}/plan.md) + $(find runs/{RUN_ID}/tests -type f 2>/dev/null | xargs wc -c 2>/dev/null | tail -1 | awk '{print $1}' || echo 600) + $(wc -c < runs/{RUN_ID}/repo-digest.md) ) / 4 ))
-OUTPUT_T=$(( $(find runs/{RUN_ID}/code -type f 2>/dev/null | xargs wc -c 2>/dev/null | tail -1 | awk '{print $1}' || echo 800) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "coder-agent" "$INPUT_T" "$OUTPUT_T"
 ```
 
 - If the Coder returned `CONTRACT_MISMATCH` (`pause_reason: contract-mismatch`) → Stop. Tell the user:
@@ -778,15 +741,6 @@ first move the previous `render-review.md` to `archive/render-review_v{render_re
 Confirm `runs/{RUN_ID}/render-review.md` exists, then record its RESULT in `report.md`
 verbatim (verdict, blocking, notes). Only you change `state.md` and the counters.
 
-After the reviewer finishes, **log cost**. Screenshots are estimated at ~1500 tokens each:
-```bash
-IMAGES=$(find runs/{RUN_ID}/render -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
-TEXT_B=$(find runs/{RUN_ID}/render -name '*.txt' -o -name 'summary.json' 2>/dev/null | xargs cat 2>/dev/null | wc -c)
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-render-reviewer.md) + $(wc -c < runs/{RUN_ID}/prd.md) + $(wc -c < runs/{RUN_ID}/plan.md) + TEXT_B ) / 4 + IMAGES * 1500 ))
-OUTPUT_T=$(( $(wc -c < runs/{RUN_ID}/render-review.md 2>/dev/null || echo 800) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "render-reviewer" "$INPUT_T" "$OUTPUT_T"
-```
-
 **`verdict: PASS`** (no BLOCKING findings): the NOTEs go into `report.md` only. Continue to Stage 6d.
 
 **`verdict: FAIL`** (at least one BLOCKING finding): read `render_retries` from `state.md`
@@ -832,7 +786,7 @@ python3 .claude/scripts/check-adr.py "{RUN_ID}" trivial
 ```
 - Exit 0 (trivial: plan.md's `## Decisions` is `None` or all `ADR: no`, no `answers-*.md`, no
   `deviations.md`): record `[adr] NONE — trivial run, writer not run` in `report.md` and
-  continue to Stage 7. No cost to log.
+  continue to Stage 7.
 - Exit 1 (it prints why it isn't trivial) or 3: run the writer.
 
 **Run subagent `orch-adr-writer`** (see "How to run a subagent stage").
@@ -859,15 +813,6 @@ python3 .claude/scripts/check-adr.py "{RUN_ID}" trivial
     ```
     Record the RESULT in `report.md` (`[adr] DONE`, then the `adrs`, `superseded`, `stale_docs`
     and `skipped` lists).
-
-After the subagent finishes, **log cost**:
-```bash
-# Estimate: input = agent prompt + plan.md + prd.md + report.md + answers + existing ADRs; output = ADR files
-ADR_IN=$(cat runs/{RUN_ID}/answers-*.md "{REPO}"/docs/adr/*.md 2>/dev/null | wc -c)
-INPUT_T=$(( ( $(wc -c < .claude/agents/orch-adr-writer.md) + $(wc -c < runs/{RUN_ID}/plan.md) + $(wc -c < runs/{RUN_ID}/prd.md) + $(wc -c < runs/{RUN_ID}/report.md) + ADR_IN ) / 4 ))
-OUTPUT_T=$(( $(find runs/{RUN_ID}/adr -type f -exec cat {} + 2>/dev/null | wc -c) / 4 ))
-bash .claude/scripts/log-cost.sh "{RUN_ID}" "adr-writer" "$INPUT_T" "$OUTPUT_T"
-```
 
 ---
 
@@ -905,13 +850,22 @@ Append to `runs/{RUN_ID}/report.md`:
 
 ---
 
-Read the token usage summary from `runs/{RUN_ID}/cost.md` and display the full table to the user.
-Every figure in it is a heuristic estimate (chars/4) of token usage, not a count from the model — present it as such. No dollar figures — tokens only.
+Measure the run's **real** token usage from Claude Code's session logs (mechanical, no LLM):
+```bash
+python3 .claude/scripts/run-usage.py "{RUN_ID}"
+```
+It writes `runs/{RUN_ID}/usage.md` and `runs/{RUN_ID}/usage.json` and prints the tables, ending
+with `total_tokens: N | weighted: W`. The figures are the exact counts the API reported, per agent
+and per subagent invocation, including every retry and resumed session; only this final stage's
+last few calls are missing. Show the user the "By agent" table. No dollar figures — tokens only.
+Exit 1 (no transcript found) or 3 (no Claude Code projects folder): say "token usage unavailable"
+with the script's message, and continue. Never fall back to estimating.
 
 Append a one-line entry to `memory.md` under `## Run history`:
 ```
-- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | size: {small|standard|small→standard} | tokens: {TOTAL_FROM_COST_MD}
+- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | size: {small|standard|small→standard} | tokens: {N} (weighted {W})
 ```
+(N and W from `run-usage.py`'s last line; `tokens: unavailable` if it found nothing.)
 
 If this run surfaced a gotcha worth remembering (a naming convention, a config quirk,
 a dependency trap: anything a future Architect/Coder/Tester would otherwise rediscover
@@ -968,7 +922,7 @@ superseded; or `none ({reason})`; or `NOT WRITTEN` with the reason.
 
 **Before you merge / deploy:** (the handoff checklist; say "nothing" if empty)
 
-**Token usage (est.):** (show the cost.md table)
+**Token usage:** (the "By agent" table from `runs/{RUN_ID}/usage.md`, or "unavailable")
 
 **Orchestrator-side artifacts (for reference/audit):**
 - PRD: `runs/{RUN_ID}/prd.md`
@@ -977,4 +931,4 @@ superseded; or `none ({reason})`; or `NOT WRITTEN` with the reason.
 - Verify details + logs: `runs/{RUN_ID}/verify.md`, `runs/{RUN_ID}/verify-logs/`
 - Render review + screenshots: `runs/{RUN_ID}/render-review.md`, `runs/{RUN_ID}/render/`
 - ADRs as written (before commit): `runs/{RUN_ID}/adr/`
-- Token usage summary: `runs/{RUN_ID}/cost.md`"
+- Token usage: `runs/{RUN_ID}/usage.md` (re-measure any time: `python3 .claude/scripts/run-usage.py {RUN_ID}`)"
