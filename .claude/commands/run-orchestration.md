@@ -96,8 +96,8 @@ anything goes wrong, before any retry starts:
 To escalate: set `size: standard` in `state.md`, append `escalated: {stage}: {one line why}` to
 `size_reasons`, and record `[size] ESCALATED to standard — {why}` in `report.md`. If Stage 4b was
 skipped, run it now on the tests already committed (as in Stage 4b, with `NOTE`: "This run was
-sized small and skipped this review; review the committed tests before the retry."), and stamp
-`.test_reviewer_passed_at` again on PASS. A FAIL there follows Stage 4b's normal retry rules.
+sized small and skipped this review; review the committed tests before the retry."), and record
+it with `review-delta.py … mark` as in Stage 4b (a PASS stamps `.test_reviewer_passed_at` again). A FAIL there follows Stage 4b's normal retry rules.
 Then do the retry the stage asked for, with Opus. An escalated run never goes back to small.
 
 ---
@@ -397,7 +397,28 @@ Read `retry_count` from state.md.
 (`touch "runs/{RUN_ID}/.test_reviewer_passed_at"`) so Stage 5b still detects any later test edit,
 and continue to Stage 5. If the run escalates later, this review runs then (see "Run size").
 
+**Full review or delta review** (mechanical, no LLM). Only the first review of a run reads every
+test; later passes (after a FAIL retry, a Verify lint fix, a sandbox fix) judge only what changed:
+```bash
+python3 .claude/scripts/review-delta.py "{RUN_ID}" "{REPO}" diff
+```
+- Exit 1 (full review: first review of the run, or the tests changed too much to judge from a
+  diff): run the reviewer as usual.
+- Exit 0 (delta review): run the reviewer with `NOTE` starting `REVIEW_MODE: delta`, followed by
+  the script's summary line and, if the last review was a FAIL, its `failures:` list ("check each is
+  fixed"), then any note of your own (e.g. "this pass only fixes lint errors").
+- Exit 2 (no test changes since a PASS review): don't run the reviewer. Record
+  `[test-reviewer] NOT NEEDED — tests unchanged since the last PASS` and continue as on PASS.
+- Exit 3: record the error and run a full review.
+Coming here from a Stage 6 timeout, skip the script and always run a full review (the timeout
+note asks for a sweep of every test).
+
 **Run subagent `orch-test-reviewer`** (see "How to run a subagent stage"). It runs in a fresh context with read-only tools, so it judges tests it did not write. If you came here from a Stage 6 timeout, pass that stage's note as `NOTE`.
+
+After every review, PASS or FAIL, record what it saw, so the next pass can be a delta:
+```bash
+python3 .claude/scripts/review-delta.py "{RUN_ID}" "{REPO}" mark {PASS|FAIL}
+```
 
 Record its RESULT in `report.md` verbatim (verdict, checklist, failures, contract gaps). **Only you change `state.md` and `retry_count`**; the reviewer never does. That keeps each rejection counted exactly once.
 
@@ -430,10 +451,9 @@ Read `retry_count` from state.md.
 
 Update `state.md`: `step: coder`, `status: running`. Show the user any contract gaps the reviewer listed as advisory items.
 
-Stamp the gate so the post-Coder check can detect any test file edited after this point:
-```bash
-touch "runs/{RUN_ID}/.test_reviewer_passed_at"
-```
+The `mark PASS` above also stamped the gate (`runs/{RUN_ID}/.test_reviewer_passed_at`), so the
+post-Coder check can detect any test file edited after this point. (When the review was NOT NEEDED,
+stamp it yourself: `touch "runs/{RUN_ID}/.test_reviewer_passed_at"`.)
 
 Continue to Stage 5.
 
@@ -596,11 +616,14 @@ Read `retry_count` from state.md.
 Update `runs/{RUN_ID}/state.md`: set `step: sandbox`, `status: running`.
 
 `run-tests.sh` reads the test command from `runs/{RUN_ID}/repo-digest.md`'s `## Test command`
-section itself. Don't copy the command by hand: pass `-`.
+section itself. Don't copy the command by hand: pass `-`. It also picks the timeout itself
+(`sandbox-timeout.py`: the repo's `verify.json` `sandbox_timeout`, else twice the slowest of this
+repo's last 5 completed runs, 120-900s, else 120s), so don't pass one. The `- Timeout:` line of its
+report entry says which value it used and why.
 
 Run the sandbox:
 ```bash
-bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" - 120
+bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" -
 SANDBOX_EXIT=$?
 ```
 
@@ -609,7 +632,7 @@ SANDBOX_EXIT=$?
 **If exit code 2 (TIMEOUT):**
 Tell the user: "Tests timed out. Routing back to Test-Reviewer."
 Re-run Stage 4 (Test-Reviewer) with `NOTE`:
-"IMPORTANT: The previous test run timed out after 120s. Check all tests for unresolved promises, missing mocks, or real network calls."
+"IMPORTANT: The previous test run timed out after {N}s (the `- Timeout:` line of the latest sandbox entry in report.md). Check all tests for unresolved promises, missing mocks, or real network calls."
 Then re-run Stage 5 and 6 if the reviewer passes.
 
 **If exit code 1 (FAIL):**

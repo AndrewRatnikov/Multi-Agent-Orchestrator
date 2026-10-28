@@ -2,7 +2,11 @@
 # run-tests.sh — sandboxed test runner for the AI orchestration pipeline
 #
 # Usage:
-#   run-tests.sh <repo_path> <run_id> [test_command|-] [timeout_seconds]
+#   run-tests.sh <repo_path> <run_id> [test_command|-] [timeout_seconds|-]
+#
+#   timeout "-" (or empty): sandbox-timeout.py picks it: the repo's verify.json
+#   "sandbox_timeout", else 2x the slowest of this repo's last 5 completed runs
+#   (120..900s), else 120s. This is the normal way to call it.
 #
 #   test_command "-" (or empty): read it from runs/{run_id}/repo-digest.md's
 #   "## Test command" section. This is the normal way to call it: the command is
@@ -32,7 +36,7 @@ set -euo pipefail
 REPO_PATH="${1:?Usage: run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]}"
 RUN_ID="${2:?Usage: run-tests.sh <repo_path> <run_id> <test_command> [timeout_seconds]}"
 TEST_CMD="${3:--}"
-TIMEOUT="${4:-120}"
+TIMEOUT="${4:--}"
 
 ORCHESTRATOR_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUN_DIR="$ORCHESTRATOR_ROOT/runs/$RUN_ID"
@@ -57,6 +61,15 @@ if [ -z "$TEST_CMD" ] || [ "$TEST_CMD" = "-" ]; then
     | grep -vE '^[[:space:]]*(```|~~~)' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
     | grep -v '^$' | awk 'BEGIN{ORS=""} NR>1{print " && "} {print}' || true)
 fi
+# "-" means: let sandbox-timeout.py pick it from this repo's recent run times.
+TIMEOUT_WHY="given by the caller"
+if [ -z "$TIMEOUT" ] || [ "$TIMEOUT" = "-" ]; then
+  RESOLVED=$(python3 "$ORCHESTRATOR_ROOT/.claude/scripts/sandbox-timeout.py" "$REPO_PATH" "$RUN_ID" 2>/dev/null || true)
+  TIMEOUT="${RESOLVED%%$'\t'*}"
+  TIMEOUT_WHY="${RESOLVED#*$'\t'}"
+  case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=120; TIMEOUT_WHY="default (sandbox-timeout.py unavailable)" ;; esac
+fi
+
 # Refuse anything that is obviously not a command, instead of "running" it and
 # reporting a FAIL that would cost the Coder a retry.
 case "$TEST_CMD" in
@@ -115,7 +128,7 @@ echo "── Test Sandbox ──────────────────
 echo "Run:     $RUN_ID"
 echo "Repo:    $REPO_PATH"
 echo "Command: $TEST_CMD"
-echo "Timeout: ${TIMEOUT}s"
+echo "Timeout: ${TIMEOUT}s ($TIMEOUT_WHY)"
 echo "─────────────────────────────────────────────────────────────────────────"
 
 log_report ""
@@ -123,7 +136,7 @@ log_report "---"
 log_report "## Test sandbox run — $TIMESTAMP"
 log_report ""
 log_report "- Command: \`$TEST_CMD\`"
-log_report "- Timeout: ${TIMEOUT}s"
+log_report "- Timeout: ${TIMEOUT}s ($TIMEOUT_WHY)"
 log_report ""
 
 # ── Step 1: Verify inputs ─────────────────────────────────────────────────────
@@ -243,13 +256,16 @@ echo ""
 # Layer 2 (outer): hard subprocess cap — catches hangs the runner doesn't catch
 cd "$SANDBOX"
 set +e
+STARTED=$(date +%s)
 run_with_timeout "$TIMEOUT" bash -c "$TEST_CMD" > "$OUTPUT_FILE" 2>&1
 EXIT_CODE=$?
+WALL=$(( $(date +%s) - STARTED ))
 set -e
 
 TEST_OUTPUT=$(cat "$OUTPUT_FILE")
 mkdir -p "$LOG_DIR"
-{ echo "\$ $TEST_CMD"; echo; cat "$OUTPUT_FILE"; } > "$LOG_FILE"
+# The footer is how sandbox-timeout.py learns this repo's run time (exit 124 = timed out).
+{ echo "\$ $TEST_CMD"; echo; cat "$OUTPUT_FILE"; echo; echo "# sandbox: wall ${WALL}s exit ${EXIT_CODE} timeout ${TIMEOUT}s"; } > "$LOG_FILE"
 
 # ── Step 7: Classify result ───────────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 124 ]; then
@@ -278,7 +294,8 @@ elif [ "$EXIT_CODE" -eq 0 ]; then
 
   log_report "### Result: PASS"
   log_report ""
-  SUMMARY=$(summary_lines "$OUTPUT_FILE")
+  # `|| true`: no summary line makes grep exit 1, which under `set -e` ended a PASS as exit 1.
+  SUMMARY=$(summary_lines "$OUTPUT_FILE" || true)
   [ -z "$SUMMARY" ] && SUMMARY=$(tail -10 "$OUTPUT_FILE")
   log_report '```'
   log_report "$SUMMARY"

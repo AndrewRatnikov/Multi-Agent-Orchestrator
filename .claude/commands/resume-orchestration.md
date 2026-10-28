@@ -143,9 +143,9 @@ Then continue through test-reviewer → coder → sandbox → verify → render 
 Run Stage 4a first, exactly as in `run-orchestration.md` (`check-contract.py … tests` when `runs/{RUN_ID}/contract.json` exists, otherwise the old `check-contract.sh`).
 Apply the same mechanical-gate logic as in `run-orchestration.md` Stage 4a (violations route
 back to Tester with the retry cap; never invoke the LLM reviewer on a dirty contract check).
-If clean, run subagent `orch-test-reviewer` (Stage 4b) and record its RESULT as in `run-orchestration.md`.
+If clean, run Stage 4b exactly as in `run-orchestration.md`: the `review-delta.py … diff` check (full, delta or not needed), subagent `orch-test-reviewer`, then `review-delta.py … mark`; record its RESULT as there.
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 4b.
-On PASS, stamp `runs/{RUN_ID}/.test_reviewer_passed_at` before continuing.
+On PASS, `mark PASS` stamps `runs/{RUN_ID}/.test_reviewer_passed_at` before continuing.
 Then continue through coder → sandbox → verify → render → adr → done (if reviewer passes).
 
 ### If RESUME_FROM = `coder`
@@ -162,8 +162,9 @@ the Coder (write the fix, commit it, re-check) without spending a sandbox run.
 Then run sandbox → verify → render → adr → done (if clean and tests pass).
 
 ### If RESUME_FROM = `sandbox`
-Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" - 120` (it reads the Test command
-from `repo-digest.md` itself; never copy it by hand).
+Run: `bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" -` (it reads the Test command
+from `repo-digest.md` and picks the timeout itself, as in `run-orchestration.md` Stage 6; never copy
+or pass either by hand).
 Apply the same PASS/FAIL/TIMEOUT routing as in `run-orchestration.md` Stage 6. On PASS, continue with Stage 6b (Verify).
 
 **If exit code is 3 or any other unlisted code (ERROR):**

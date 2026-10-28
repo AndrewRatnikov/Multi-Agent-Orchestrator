@@ -25,6 +25,23 @@ Read:
 3. `runs/{RUN_ID}/prd.md`: the original acceptance criteria
 4. `{REPO}/.claude/rules/*.md`, if present: environment gotchas that make a test fail or pass for reasons unrelated to the feature
 
+### Delta review (`NOTE` starts with `REVIEW_MODE: delta`)
+
+An earlier review in this run already covered the whole suite. Only the changes in
+`runs/{RUN_ID}/review-delta.diff` are new, so judge those instead of re-reading everything:
+1. Read `review-delta.diff`. If the NOTE lists failures from the previous review, check each one is
+   actually fixed.
+2. Read surrounding test code only where the diff can't tell you whether an assertion is still
+   meaningful (`Read` with `offset`/`limit` around the hunk; don't read whole files).
+3. Don't re-read `prd.md` or `plan.md` unless a changed test touches a criterion or contract item you
+   need to check; then Grep for it and read just that part.
+4. Apply the checklist to the changed tests. For C1-C3: no deleted test case or removed assertion
+   leaves a criterion uncovered, and no assertion was weakened or loosened (e.g. `toBe` → `toBeTruthy`,
+   a narrowed expectation, a new `.skip`).
+5. FAIL if a listed failure isn't fixed or a change weakens a test. Report `test_cases_reviewed` as the
+   number of changed test cases. If the diff turns out to need the full context to judge, say so in
+   a failure line rather than guessing.
+
 **Contract compliance was already verified mechanically** (`check-contract.py` against `contract.json`: testids, imports, packages, banned patterns). Don't re-litigate those. Your checklist is judgment calls only.
 
 ## Checklist
