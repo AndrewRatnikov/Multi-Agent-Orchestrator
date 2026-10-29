@@ -149,8 +149,13 @@ On PASS, `mark PASS` stamps `runs/{RUN_ID}/.test_reviewer_passed_at` before cont
 Then continue through coder → sandbox → verify → render → adr → done (if reviewer passes).
 
 ### If RESUME_FROM = `coder`
+**Unfinished sliced first pass:** if `runs/{RUN_ID}/coder-slices.json` lists N > 1 slices and
+`coder_slices_done` in `state.md` (missing = 0) is below N, the first pass was interrupted (e.g. a
+rate limit). Seed `code/`, then run the remaining slices k = coder_slices_done+1..N exactly as in
+`run-orchestration.md` Stage 5 ("Slice the first pass", no `FEEDBACK`), and continue from there
+as Stage 5 does. Otherwise, it's a fix pass:
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
-Seed `code/` first (`python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"`, exactly as in `run-orchestration.md` Stage 5), then run subagent `orch-coder` with `FEEDBACK: {LAST_FAIL_OUTPUT}`, then handle its RESULT exactly as in `run-orchestration.md` Stage 5, including the scope check and the Files-changed completeness check.
+Seed `code/` first (`python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"`, exactly as in `run-orchestration.md` Stage 5) and clear any slice marker (`python3 .claude/scripts/coder-slices.py set "{RUN_ID}" 0`), then run subagent `orch-coder` with `FEEDBACK: {LAST_FAIL_OUTPUT}`, then handle its RESULT exactly as in `run-orchestration.md` Stage 5, including the scope check and the Files-changed completeness check.
 Then commit each changed file to {REPO} exactly as in `run-orchestration.md` Stage 5's
 "Commit each implemented file to {REPO}" sub-step (one commit per row in the plan's
 Files-changed table that actually changed; `retry_count > 0` here, so every commit is

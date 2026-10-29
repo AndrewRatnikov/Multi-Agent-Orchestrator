@@ -72,6 +72,27 @@ if m:
     except Exception:
         pass
 ')
+        # Sliced first pass (coder-slices.py): a pass may not do a LATER slice's work,
+        # or its context grows back to what slicing is meant to avoid.
+        LATER=$(REL="$REL" ROOT="$REAL_ROOT" /usr/bin/python3 -c '
+import json, os, re
+m = re.match(r"runs/(run_[^/]+)/code/(.+)$", os.environ["REL"])
+if m:
+    run = os.path.join(os.environ["ROOT"], "runs", m.group(1))
+    try:
+        k = int(open(os.path.join(run, ".coder-slice")).read().strip() or 0)
+        if k > 0:
+            for s in json.load(open(os.path.join(run, "coder-slices.json")))["slices"]:
+                if s["index"] > k and any(f["path"] == m.group(2) for f in s["files"]):
+                    print("%d (%s)" % (s["index"], s["label"]))
+                    break
+    except Exception:
+        pass
+')
+        if [ -n "$LATER" ]; then
+          echo "Blocked by pipeline write guard: $REL belongs to a later Coder slice, $LATER. Implement only your own slice's files (runs/<run>/coder-slices.json); the next pass does that file." >&2
+          exit 2
+        fi
         if [ -n "$GEN" ]; then
           echo "Blocked by pipeline write guard: $REL is a generated file (\`$GEN\`). Don't edit it: change its sources, and the orchestrator re-runs the generator after your pass." >&2
           exit 2

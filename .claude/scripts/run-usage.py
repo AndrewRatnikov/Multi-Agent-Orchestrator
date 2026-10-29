@@ -109,6 +109,7 @@ class Tally:
         self.models = []
         self.first = self.last = None
         self.sources = set()
+        self.detail = None
 
     def add(self, e, src):
         msg = e["message"]
@@ -294,6 +295,9 @@ def collect(run_id, files):
         if not stage:
             stage = "subagent (unknown type)"
         t = Tally(stage)
+        sl = re.search(r"SLICE\s+(\d+/\d+)", prompt)
+        if sl:
+            t.detail = "slice " + sl.group(1)
         for key, e in real_calls(entries):
             if key in seen_calls:
                 continue
@@ -395,12 +399,16 @@ def render(run_id, orch, segments, invocations, notes):
         n = counts[t.label]
         c = Tally(f"{t.label}" + (f" #{n}" if n > 1 else ""))
         c.merge(t)
+        c.detail = t.detail
         numbered.append(c)
     for label, k in counts.items():
         if k > 1:
             for c in numbered:
                 if c.label == label:
                     c.label = f"{label} #1"
+    for c in numbered:
+        if c.detail:
+            c.label = f"{c.label} ({c.detail})"
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     L = [f"# Token usage: {run_id}", "",
