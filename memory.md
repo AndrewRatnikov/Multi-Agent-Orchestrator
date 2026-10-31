@@ -21,6 +21,7 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 ---
 
 ## Pipeline gotchas
+- [active] check-contract.py code-mode `exports` did not recognise `export type { X } from` re-exports (false MISSING_EXPORT); EXPORT_PATTERNS now accepts it. Also: `check-contract.py validate` fails with CREATE_FILE_EXISTS once the branch holds created files, so re-validate against the original branch only. (added: run_20261029_165724)
 - [active] repo-digest.sh echoes the whole TASK into the 'Similar existing files' heading; with a long multi-line task the digest balloons (~9k tokens). Trim that heading to one line before Stage 1. (added: run_20261022_204015)
 - [active] A Tester may leave plan MODIFY test files out of tests/ when they need no change; check-paths then fails with MISSING_FILE. Fix: cp the repo file verbatim into runs/{RUN_ID}/tests/ (no diff) instead of letting the Tester re-type it. (added: run_20261022_204015)
 - [active] Architect verify-block greps that forbid a removed symbol (e.g. ExpenseRowEditor) must `--exclude` test files: a Tester guard test legitimately names the symbol in regex literals and fails the grep. (added: run_20261020_064158)
@@ -56,6 +57,11 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 
 - [active] The sandbox timeout (120 s in the stage text) is too short once a repo has heavy suites (multi-device PGlite + PBKDF2 sync tests: full suite ~115-120 s). A TIMEOUT there is not necessarily a broken test: re-run `run-tests.sh ... - 900` to measure before routing to the Test-Reviewer. Sandbox/Verify run `npm ci` in a worktree, so deps missing from the repo own node_modules (fflate, pglite) are an env gap, not a code defect. (added: run_20261024_210606)
 - [active] When the Coder reports that the sandbox will fail on defects in Tester-owned files (confirmed with a repro), route to the Tester with those items directly, then 4a/4b delta review and re-stamp .test_reviewer_passed_at; do not spend Coder retries. Verify lint feedback: split by file owner (Tester files first, then Coder), include warnings too when the task demands 0 new warnings (compare with verify-logs/baseline-01-lint.log). (added: run_20261024_210606)
+- [active] After a Tester fix that follows a sandbox/Verify failure, `check-contract.py code` reports TESTS_MODIFIED_AFTER_REVIEW until the delta review passes and `review-delta.py mark PASS` restamps; run the delta review first, don't stop on it. A Tester that cannot execute tests leaves ~9 sandbox-only defects (plural keys, mocks, UUID formats) in a 30+ file run; the Coder's scratch-copy run predicts them. (added: run_20261030_212632)
+
+- [active] Architect's contract.json `existing` testids can miss ids that exist on main (e.g. landing-page); the Tester then evades the checker. Fix by adding to `existing`, not by obfuscating selectors. (added: run_20261031_094926)
+- [active] Sync/PGlite tests with a frozen Date: later writes tie on updatedAt and lose under existing merge rules; tests must advance vi.setSystemTime between ordered writes. (added: run_20261031_094926)
+
 ## check-contract.sh known false positives
 
 > **Legacy (runs without `contract.json`).** Since 2026-10-02 the Architect writes
@@ -169,3 +175,6 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 - run_20261023_212635 | 2026-10-23 | task: encrypted sync server + accounts/plans layer (MinimaSpend run 2) | result: PASS | size: standard | tokens: 373586
 - run_20261024_210606 | 2026-10-24 | task: encrypted sync end to end (engine, link flows, header adoption, settings UI, copy, PGlite multi-device tests; run 3) | result: PASS (standard; 1 test-reviewer retry, 1 sandbox failure from Tester-owned defects routed to Tester, 1 Verify lint retry; render SKIPPED, no render config; interrupted once by API rate limit and resumed) | size: standard | tokens: 487351
 - run_20261028_212133 | 2026-10-29 | task: Spaces groundwork (personal + Family local data layer) | result: PASS | size: standard | tokens: 89430144 (weighted 13728802)
+- run_20261029_165724 | 2026-10-29 | task: Family space server (Supabase) | result: PASS | size: standard | tokens: 33759459 (weighted 7692923)
+- run_20261030_212632 | 2026-10-31 | task: Family sharing flows (key bundle, Family sync stream, create/invite/join/approve/rotate/remove, Settings → Family, /join; run C) | result: PASS | size: standard | tokens: 93634078 (weighted 16125059)
+- run_20261031_094926 | 2026-10-31 | task: Family UX run D (switcher, paid-by, member analytics, moveRecords, go-live checklist) | result: PASS | size: standard | tokens: 93603414 (weighted 16239300)

@@ -561,7 +561,7 @@ def check_tests(c, repo, tests_dir):
 
 EXPORT_PATTERNS = (
     r"export\s+(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|class|interface|type|enum|abstract\s+class)\s+{name}\b",
-    r"export\s*\{{[^}}]*\b{name}\b[^}}]*\}}",
+    r"export\s*(?:type\s*)?\{{[^}}]*\b{name}\b[^}}]*\}}",
     r"export\s+\*\s+as\s+{name}\b",
 )
 
