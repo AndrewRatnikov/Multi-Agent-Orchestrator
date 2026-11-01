@@ -80,9 +80,9 @@ checks out a new `orchestrator/{run_id}` branch there and works on it directly f
 the rest of the run. Planning docs (`prd.md`, `plan.md`) stay in this orchestrator
 project's `runs/{run_id}/`, but tests and code land as real commits in the target
 repo as they're produced: one commit for the tests (written before any
-implementation), then one commit per file from the plan's Files-changed table as the
-Coder implements it. A retry doesn't rewrite history — it adds a `fix:` commit on
-top. By the time a run finishes, the change is already fully committed on
+implementation), then the Coder's work as logical commits planned by the Architect
+(`commits` in contract.json: one coherent piece of work each, in build order). A retry
+doesn't rewrite history — it adds one `fix:` commit on top. By the time a run finishes, the change is already fully committed on
 `orchestrator/{run_id}`; there's nothing left to copy or apply. Your previous branch
 is never touched.
 
@@ -120,7 +120,7 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
   agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
   commands/        # /run-orchestration, /resume-orchestration
   render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
-  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, sandbox-timeout.py, verify.py, render-capture.mjs, run-usage.py, seed-code.py, coder-slices.py, regen.py, review-delta.py, guard-writes.sh
+  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, sandbox-timeout.py, verify.py, render-capture.mjs, run-usage.py, seed-code.py, coder-slices.py, commit-code.py, regen.py, review-delta.py, guard-writes.sh
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet

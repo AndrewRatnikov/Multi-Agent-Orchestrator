@@ -92,6 +92,7 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261101_160957 | 2026-11-01 | task: one shared page width (PageContainer) + desktop layouts for Dashboard/Analytics/Recurring/Settings in minima-spend | result: PASS (2 tester retries: undeclared testids, a PageShell loading-branch race in one test; 2 coder slices; render SKIPPED, no render config) | size: standard | tokens: 20236155 (weighted 4383320)
 - run_20261020_064158 | 2026-10-20 | task: expense add/edit drawer (URL params), suggestions, per-category default currency, repeat last, PWA shortcut | result: PASS (verify plan-grep for ExpenseRowEditor fixed once; render SKIPPED) | size: standard | tokens: 381591 (est)
 - run_20261017_142658 | 2026-10-17 | task: signed-in redesign Phase 1 (Foundations) | result: PASS | size: standard | tokens: 509806
 - run_20261007_212533 | 2026-10-07 | task: minima-spend Phase 1 safety net (write lock, never-overwrite-undecryptable + quarantine, query error states, BroadcastChannel sync, B1 range-scaled budget) | result: PASS (1 test-reviewer retry: Settings error tests missing; 1 coder retry: dashboard Link rendered before queries settled; render SKIPPED) | tokens: 190521 (est)
@@ -178,3 +179,4 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 - run_20261029_165724 | 2026-10-29 | task: Family space server (Supabase) | result: PASS | size: standard | tokens: 33759459 (weighted 7692923)
 - run_20261030_212632 | 2026-10-31 | task: Family sharing flows (key bundle, Family sync stream, create/invite/join/approve/rotate/remove, Settings → Family, /join; run C) | result: PASS | size: standard | tokens: 93634078 (weighted 16125059)
 - run_20261031_094926 | 2026-10-31 | task: Family UX run D (switcher, paid-by, member analytics, moveRecords, go-live checklist) | result: PASS | size: standard | tokens: 93603414 (weighted 16239300)
+- run_20261101_145216 | 2026-11-01 | task: Settings grouped list/sidebar + shared chart colour tokens | result: PASS | size: standard | tokens: 26003525 (weighted 5082327)

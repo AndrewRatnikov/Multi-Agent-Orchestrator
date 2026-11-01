@@ -38,8 +38,14 @@ contract.json (written by the Architect):
     {"id": "dashboard-no-budget", "route": "/", "state": "no-budget",
      "fixture": "no-budget", "ready": "dashboard-summary", "look_for": "income shown once"}
   ],
-  "render_skip_reason": ""                     # alternative to render_targets for a UI change with nothing to render
+  "render_skip_reason": "",                    # alternative to render_targets for a UI change with nothing to render
+  "commits": [                                 # the Coder's work as logical commits, in build order
+    {"message": "feat(sets): missing-coins CSV builder", "files": ["apps/web/src/lib/x.ts"]}
+  ]
 }
+
+`commits` (checked by validate): every coder-owned file in exactly one commit, no test files
+(Stage 3 commits the tests first), messages "type(scope): summary" up to 72 characters.
 """
 
 import json
@@ -333,7 +339,60 @@ def schema_errors(data):
         if not isinstance(e, dict) or not e.get("file"):
             errs.append("SCHEMA: exports entries need `file`: {}".format(json.dumps(e)))
     errs += render_schema_errors(data)
+    errs += commits_schema_errors(data)
     return errs
+
+
+COMMIT_SUBJECT = re.compile(r"^(feat|fix|refactor|perf|docs|test|chore|build|ci|style)(\([\w./@-]+\))?!?: \S.*$")
+
+
+def commits_schema_errors(data):
+    if "commits" not in data:
+        return []
+    cs = data["commits"]
+    if not isinstance(cs, list) or not cs:
+        return ["SCHEMA: `commits` must be a non-empty list"]
+    errs = []
+    for i, c in enumerate(cs):
+        if not isinstance(c, dict):
+            errs.append("SCHEMA: commits[{}] must be an object with `message` and `files`".format(i)); continue
+        m = c.get("message")
+        if not isinstance(m, str) or not m.strip() or "\n" in m:
+            errs.append("SCHEMA: commits[{}].message must be a one-line string".format(i))
+        if not isinstance(c.get("files"), list) or not c["files"] or not all(isinstance(f, str) for f in c["files"]):
+            errs.append("SCHEMA: commits[{}].files must be a non-empty list of paths".format(i))
+    return errs
+
+
+def check_commits(c, data):
+    """The Coder's files grouped into logical commits: complete, disjoint, well named."""
+    v = []
+    cs = data.get("commits")
+    if not cs:
+        return ["COMMITS_MISSING: contract.json has no `commits`: group the coder-owned files into logical commits "
+                "(one coherent piece of work each, in build order)"]
+    coder = {f["path"] for f in c.files if f.get("owner") == "coder"}
+    tester = {f["path"] for f in c.files if f.get("owner") == "tester"}
+    seen = {}
+    for i, cm in enumerate(cs):
+        msg = cm["message"].strip()
+        if not COMMIT_SUBJECT.match(msg):
+            v.append("COMMIT_MESSAGE_FORMAT: commits[{}] {!r}: use \"type(scope): summary\" (feat, fix, refactor, perf, docs, "
+                     "test, chore, build, ci, style)".format(i, msg))
+        if len(msg) > 72:
+            v.append("COMMIT_MESSAGE_LONG: commits[{}] is {} characters; keep the subject within 72".format(i, len(msg)))
+        for f in cm["files"]:
+            if f in tester:
+                v.append("COMMIT_HAS_TEST_FILE: {} is tester-owned; tests are committed first, on their own, by Stage 3".format(f))
+            elif f not in coder:
+                v.append("COMMIT_FILE_UNKNOWN: commits[{}] lists {}, which isn't a coder-owned file in contract.json".format(i, f))
+            elif f in seen:
+                v.append("COMMIT_FILE_TWICE: {} is in commits[{}] and commits[{}]; each file goes in exactly one".format(f, seen[f], i))
+            else:
+                seen[f] = i
+    for f in sorted(coder - set(seen)):
+        v.append("COMMIT_FILE_MISSING: coder-owned {} is in no commit".format(f))
+    return v
 
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -475,6 +534,7 @@ def check_validate(c, repo, plan_path, run_dir=None):
         v.append("PACKAGE_JSON_NOT_IN_CONTRACT: packages.added is non-empty but no package.json is in contract.json files")
     if run_dir:
         v += check_render(c, repo, run_dir, plan_path)
+    v += check_commits(c, c.data)
     return v
 
 

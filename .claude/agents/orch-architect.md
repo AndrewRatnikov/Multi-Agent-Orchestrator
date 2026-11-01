@@ -83,8 +83,9 @@ Step-by-step: which files are modified vs created, what data/props flow where, s
 (Paths are relative to the repo root. List **every** file this run creates or modifies,
 **including every test file the Tester will write** (purpose e.g. "tests (Tester)"). A
 script checks the Tester's and Coder's output against this table before anything is
-committed, and rejects undeclared files. The orchestrator commits code files one per row,
-in this order; test rows are committed together in the Tester's commit.)
+committed, and rejects undeclared files. Test rows are committed first, together, in the
+Tester's commit; the code rows are committed as the logical commits you plan in
+contract.json's `commits`.)
 
 ## Interface Contract
 
@@ -191,6 +192,12 @@ if a name isn't in contract.json, the Tester can't use it and the Coder isn't he
   "render_targets": [
     {"id": "sets-missing-empty", "route": "/sets/example/missing", "state": "empty", "fixture": "empty-set",
      "ready": "missing-page-root", "look_for": "empty-state message, no blank table"}
+  ],
+  "commits": [
+    {"message": "feat(sets): missing-coins CSV builder",
+     "files": ["apps/web/src/lib/missing-list.ts"]},
+    {"message": "feat(sets): download missing coins from the set editor",
+     "files": ["apps/web/src/app/sets/[id]/page.tsx"]}
   ]
 }
 ```
@@ -220,6 +227,20 @@ Rules:
   - If a UI file changes but there is truly nothing to open in a browser (a component no page renders yet), set `"render_skip_reason": "…"` instead, and say why.
   - plan.md's `## Render targets` table must list the same targets.
 
+- **commits**: how the Coder's work lands in the repo's history. Group the coder-owned files
+  into **logical commits**: each one a coherent piece of work a reviewer can read on its own
+  (a data-layer change with the types it needs, a screen and its route, the copy for a feature),
+  not one commit per file and not one commit for everything. Order them so each builds on the
+  ones before (data and types before the code that uses them; copy and docs last).
+  - Every coder-owned file in exactly one commit; no test files (the Tester's tests are
+    committed first, on their own, before any code).
+  - `message`: one line, `type(scope): summary` (feat, fix, refactor, perf, docs, test, chore,
+    build, ci, style), at most 72 characters, saying what the commit does for the product, e.g.
+    `feat(spaces): space-scoped storage keys in localDb`.
+  - A generated file (e.g. a translation review table rebuilt from the catalogs) goes in the
+    same commit as its sources. A `package.json` change brings its lockfile along automatically.
+  - As a guide: 3 to 10 commits for a typical run, fewer for a small one.
+
 Then run the validator yourself (read-only, safe) and fix anything it reports:
 ```bash
 python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
@@ -232,6 +253,7 @@ python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
 - [ ] The contract names every selector, export, prop and path a test will need
 - [ ] Every PRD acceptance criterion appears in the coverage table
 - [ ] `contract.json` lists the same files as the Files changed table, and every testid, export and new package the plan mentions; `check-contract.py … validate` is clean
+- [ ] `commits` groups every coder-owned file into logical, reviewable commits in build order, with `type(scope): summary` messages
 - [ ] If the task touches UI: `render_targets` has one target per route **and per data state** the change affects (every route that renders a changed component; every branch such as "no data" / "has data" / "over limit"), each with a real fixture and a declared `ready` testid, and plan.md's `## Render targets` matches
 - [ ] Path aliases match the workspace member's tsconfig
 - [ ] Any new dependency is justified and listed in Files changed (`package.json` MODIFY)

@@ -156,10 +156,8 @@ rate limit). Seed `code/`, then run the remaining slices k = coder_slices_done+1
 as Stage 5 does. Otherwise, it's a fix pass:
 Read the last FAIL output from `runs/{RUN_ID}/report.md` (the most recent test sandbox result).
 Seed `code/` first (`python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"`, exactly as in `run-orchestration.md` Stage 5) and clear any slice marker (`python3 .claude/scripts/coder-slices.py set "{RUN_ID}" 0`), then run subagent `orch-coder` with `FEEDBACK: {LAST_FAIL_OUTPUT}`, then handle its RESULT exactly as in `run-orchestration.md` Stage 5, including the scope check and the Files-changed completeness check.
-Then commit each changed file to {REPO} exactly as in `run-orchestration.md` Stage 5's
-"Commit each implemented file to {REPO}" sub-step (one commit per row in the plan's
-Files-changed table that actually changed; `retry_count > 0` here, so every commit is
-a `fix:` commit).
+Then commit to {REPO} exactly as in `run-orchestration.md` Stage 5's "Commit the implementation
+to {REPO}" sub-step (`retry_count > 0` here, so it's one `fix:` commit via `commit-code.py --fix`).
 Apply the same retry/stop logic as in `run-orchestration.md` Stage 6.
 Then run Stage 5b (`check-contract.py … code`, or `check-contract.sh … --code` for runs without contract.json) exactly as in `run-orchestration.md` Stage 5b —
 a `TESTS_MODIFIED_AFTER_REVIEW` violation is a hard stop, a `MISSING_TESTID_IN_CODE` violation routes back to

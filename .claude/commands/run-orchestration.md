@@ -516,53 +516,29 @@ or `## Coder pass render-{render_retries}` on a render-review retry), verbatim, 
 `report.md`. Never create the file for a pass with no deviations: Stage 6d treats an absent or
 empty file as "the code follows the plan".
 
-### Commit each implemented file to {REPO}
+### Commit the implementation to {REPO}
 
-Read `retry_count` from `runs/{RUN_ID}/state.md` once — `0` means first pass, `>0`
-means this is a fix pass triggered by Stage 5b or Stage 6 below, for every file below.
+One mechanical call does the whole step: it copies `runs/{RUN_ID}/code/` into {REPO}, runs
+`autofix.py` (lint --fix) and `regen.py` (rebuilds generated files such as a translation review
+table, and copies them back into `code/`), updates the lockfile if a `package.json` changed, and
+commits. Read `retry_count` from `state.md` once:
 
-Copy all of the Coder's files in and auto-fix them once, before committing:
-```bash
-cp -r "runs/{RUN_ID}/code/." "{REPO}/"
-python3 .claude/scripts/autofix.py "{REPO}" "{RUN_ID}" code
-python3 .claude/scripts/regen.py "{REPO}" "{RUN_ID}" run
-```
-(Append both scripts' output lines to `report.md`.) `regen.py` re-runs the generator of every
-generated file in `runs/{RUN_ID}/generated.json` (e.g. `npm run i18n:review` for a translation
-review table) from the sources the Coder just changed, and copies the result back into
-`runs/{RUN_ID}/code/`. The Coder never types these files. It never blocks: a failed generator is
-reported, and Verify catches a stale file.
+- `retry_count` is `0` (first pass): **logical commits**, one per group in `contract.json`'s
+  `commits`, in that order (groups with no change are skipped):
+  ```bash
+  python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}"
+  ```
+- `retry_count` is `>0` (a fix pass after Stage 5b, the sandbox, Verify or the render review):
+  **one** commit for the whole pass, with a summary of what it fixes:
+  ```bash
+  python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}" --fix "{what this pass fixes, a few words} (retry {retry_count}/2)"
+  ```
 
-Then read the `## Files changed` table in `runs/{RUN_ID}/plan.md` and work through it top
-to bottom. **Skip rows for test files** (files that exist under `runs/{RUN_ID}/tests/`):
-Stage 3 already committed them. For each remaining row (`{file}`, `{action}`, `{purpose}`):
-
-```bash
-git -C "{REPO}" add "{file}"
-```
-
-If nothing is staged for `{file}` (`git -C "{REPO}" diff --cached --quiet -- "{file}"` exits 0),
-it's unchanged from what's already committed — skip it, no commit. Otherwise
-commit it on its own, right now, before moving to the next row:
-
-- `retry_count` is `0`: `git commit -m "{VERB}: {file}\n\n{purpose}\n\nRun: {RUN_ID}"` — `{VERB}` is `create` if the table's Action column says CREATE, `modify` if MODIFY.
-- `retry_count` is `>0`: `git commit -m "fix: {file} — address feedback (retry {retry_count}/2)\n\nRun: {RUN_ID}"`
-
-```
-
-One commit per changed file, in table order — the plan's Files-changed table becomes
-the commit history on `{BRANCH}` directly. Never batch multiple files into one
-commit, and never commit a file with no staged diff.
-
-**Lockfile.** If any `package.json` changed in this pass, update the lockfile so a
-frozen install (CI, the deploy, and Stage 6b) works, and commit it separately:
-```bash
-(cd "{REPO}" && pnpm install --lockfile-only)   # npm repos: npm install --package-lock-only
-git -C "{REPO}" add pnpm-lock.yaml
-git -C "{REPO}" diff --cached --quiet || git -C "{REPO}" commit -m "chore: update lockfile
-
-Run: {RUN_ID}"
-```
+Append its output (one line per commit, plus any autofix/regen/WARNING lines) to `report.md`.
+Exit 1 means a git step failed: show the message and stop with `status: failed`,
+`pause_reason: commit-failed`. A `WARNING` about files in no planned commit or uncommitted
+changes outside the run is worth showing the user, but isn't a stop. Tests are never part of
+these commits: Stage 3 committed them first, on their own.
 
 - If the Coder returned `CONTRACT_MISMATCH` (`pause_reason: contract-mismatch`) → Stop. Tell the user:
   "Pipeline paused: CONTRACT_MISMATCH detected. The Interface Contract needs correction.
@@ -729,8 +705,9 @@ summary at the end of `verify.md` has `new_errors_by_file` (repo file → its ne
 lines) and `failed_steps_without_file_info` (failed steps whose output names no file,
 e.g. a failing e2e suite).
 
-- **Lockfile** (install step with the lockfile hint): fix it yourself with the Stage 5
-  lockfile commands, then re-run Stage 6b. This doesn't count as a retry.
+- **Lockfile** (install step with the lockfile hint): fix it with
+  `python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}" --lockfile`, then re-run Stage 6b.
+  This doesn't count as a retry.
 - **Otherwise**, read `verify_retries` from `state.md` (missing counts as 0). If it is `>= 2`, stop and tell the
   user (show the failures; they can fix by hand and `/resume-orchestration {RUN_ID} --from verify`,
   or resume from tester/coder). If it is `< 2`, increment it and split the problems:
@@ -899,7 +876,8 @@ Finished: {TIMESTAMP}
 ```
 
 Every test and code change has already been committed to `{BRANCH}` in {REPO} as the
-pipeline worked, one commit per step — there is nothing left to copy or apply.
+pipeline worked: the tests first, then the logical commits, then any `fix:` commits — there is
+nothing left to copy or apply.
 Collect the commit log for the report:
 
 ```bash
