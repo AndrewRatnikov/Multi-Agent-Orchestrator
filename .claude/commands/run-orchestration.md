@@ -1,8 +1,15 @@
 # Run Orchestration Pipeline
 
-You are the master orchestrator for the AI dev pipeline. Your job is to run a spec-driven, test-first pipeline that turns an idea into a tested, validated implementation.
+You are the master orchestrator for the AI dev pipeline: a spec-driven, test-first pipeline that
+turns an idea into a tested, validated branch. The pipeline's control flow lives in
+`.claude/scripts/orch.py`. It runs every mechanical step itself (contract and path checks, sizing,
+seeding, slicing, commits, the sandbox, Verify, the render capture, review deltas), and it owns
+`state.json`/`state.md`, `report.md`, retry counters, escalation and routing. **Your job is the
+loop:** ask `orch.py` what to do, do exactly that, hand the result back.
 
-You sequence the following stages in order. **The LLM stages (Product, Architect, Tester, Test-Reviewer, Coder, Render-Reviewer, ADR-Writer) each run as their own subagent** (`.claude/agents/orch-*.md`) in a fresh context, with their own model and tool limits. You never do a stage's work yourself, and you never execute an agent's instructions inline. You own everything between stages: `state.md`, `report.md`, `memory.md`, retry counters, the mechanical gates, the sandbox, and every git operation. You do not skip steps, invent shortcuts, or call external services; you follow the stage instructions exactly.
+You never do a stage's work yourself, never run the pipeline's scripts or git commands by hand,
+never edit `state.md`, `state.json` or `report.md`, and never decide a verdict: an exit code or a
+RESULT block decides, and `orch.py` reads them. Stages are strictly sequential.
 
 ## Arguments
 
@@ -11,967 +18,99 @@ $ARGUMENTS
 ```
 
 Parse `$ARGUMENTS` as:
-- Everything before `--repo` / `--size` is the **task description** (TASK)
-- `--repo <path>` is the **target repository path** (REPO), defaults to `$(pwd)`
-- `--size small|full` (optional) overrides the automatic run size decided after the Architect
-  (see "Run size"). Store it as `size_override` in `state.md`. Omit it to let the rules decide.
+- everything before `--repo` / `--size` is the **task description** (TASK);
+- `--repo <path>` is the target repository (REPO), default `$(pwd)`;
+- `--size small|full` (optional) overrides the automatic run size;
+- `--unattended` (optional): no one is there to answer questions (scheduled or headless runs).
 
 If TASK is empty, ask the user what they want to build and wait for their answer.
 
-Verify REPO exists and has a `package.json` or `pyproject.toml`. If not, tell the user and stop.
+## Start
 
-Resolve REPO to an absolute path:
-```bash
-REPO=$(cd "{REPO}" && pwd)
-echo "$REPO"
-```
-
-Determine ORCHESTRATOR_ROOT — the absolute path of the directory containing this `.claude/` folder:
-```bash
-ORCHESTRATOR_ROOT=$(cd "$(dirname "$(dirname "$0")")" && pwd)
-echo "$ORCHESTRATOR_ROOT"
-```
-
----
-
-## How to run a subagent stage
-
-Use this procedure for every stage below that says **Run subagent `orch-…`**.
-
-1. **Spawn it** with the Agent tool, `subagent_type: "orch-<stage>"`. Use this prompt, filling in only the lines that apply:
-   ```
-   ORCHESTRATOR_ROOT: {ORCHESTRATOR_ROOT}
-   RUN_ID: {RUN_ID}
-   STAGE: orch-<stage>
-   REPO: {REPO}
-   TASK: {TASK}
-   ANSWERS: {the user's answers, if re-running after NEEDS_INPUT}
-   FEEDBACK: {violations / reviewer failures / sandbox output, verbatim, if this is a retry}
-   NOTE: {extra instruction from the stage, if any}
-   Follow your agent instructions. Finish with the RESULT block.
-   ```
-   Always include the `STAGE` line: `run-usage.py` uses it to attribute the subagent's tokens to its stage.
-   Pass file contents only by path, never pasted in: the subagent reads them itself. That keeps your own context small and the stage's context clean.
-   **Model:** each agent runs on the model in its own definition, except on a **small** run
-   (`size: small` in `state.md`), where you pass `model: "sonnet"` for `orch-tester` and
-   `orch-coder`. See "Run size".
-2. **Wait for its final report.** Stages are strictly sequential: never start the next stage, or a second copy of this one, while it's still running.
-3. **Parse the `## RESULT` block** at the end of its report. If the block is missing or malformed, treat that as a stage failure: record it in `report.md` and stop. Don't guess the outcome from the prose.
-4. **Record it.** Append a line to `runs/{RUN_ID}/report.md`, e.g. `[{stage}] {status or verdict} — {summary}`, followed by any lists the RESULT block contains (files, failures, gaps). Subagents never write `state.md`, `report.md` or `memory.md`; you do.
-5. **Scope check (Tester and Coder only),** before any `cp` into {REPO}:
-   ```bash
-   git -C "{REPO}" status --porcelain
-   ```
-   The output must be empty: at this point, anything the pipeline wants in {REPO} is committed. If anything shows up, a subagent wrote outside its folder (its write guard blocks Write/Edit, but not Bash). Show the user the list, set `status: paused`, `pause_reason: scope-violation` in `state.md`, and stop. Don't delete anything yourself.
-6. **Questions (Product and Architect only).** If the RESULT says `status: NEEDS_INPUT`:
-   - Write the questions to `runs/{RUN_ID}/questions-{stage}.md`, and set `status: paused`, `pause_reason: awaiting_human_input` in `state.md`.
-   - Show the questions to the user and ask them to answer here.
-   - If they answer in this session: save the answers to `runs/{RUN_ID}/answers-{stage}.md`, set `status: running`, and run the same subagent again with `ANSWERS`. Repeat if it asks again.
-   - If the session ends first, `/resume-orchestration {RUN_ID} --from {stage}` picks it up (it reads the questions file).
-
----
-
-## Run size
-
-Every run is **standard** until Stage 2 sizes it. Right after the Architect, `size-run.py`
-reads `contract.json` (what the run will actually touch) and marks the run **small** only when
-it changes at most 3 code files (tests don't count; a repo can set `max_files`), adds no
-package, touches no sensitive path (schema and migrations, auth, crypto, dependencies, build and
-deploy config, plus the repo's own list in the `sizing` section of its `.claude/verify.json`,
-read from `{ORIGINAL_BRANCH}`), the user answered no questions, and no decision in plan.md is
-marked for an ADR. `--size small|full` overrides the rules.
-
-A small run **keeps every mechanical gate**: the contract checks, the path check, the sandbox,
-Verify and the render review all run exactly as on a standard run. It only trims the LLM stages:
-- the Tester and the Coder run on Sonnet instead of Opus;
-- the LLM Test-Reviewer (Stage 4b) is skipped; the mechanical Stage 4a check still runs;
-- the ADR stage usually ends in its trivial skip.
-
-**Escalation (fail up).** A small run becomes standard for the rest of the run the first time
-anything goes wrong, before any retry starts:
-- Stage 4a sends the tests back to the Tester;
-- the Coder returns `CONTRACT_MISMATCH`, or Stage 5b or the path check sends it back;
-- the sandbox, Verify or the render review fails and routes work to the Tester or Coder.
-
-To escalate: set `size: standard` in `state.md`, append `escalated: {stage}: {one line why}` to
-`size_reasons`, and record `[size] ESCALATED to standard — {why}` in `report.md`. If Stage 4b was
-skipped, run it now on the tests already committed (as in Stage 4b, with `NOTE`: "This run was
-sized small and skipped this review; review the committed tests before the retry."), and record
-it with `review-delta.py … mark` as in Stage 4b (a PASS stamps `.test_reviewer_passed_at` again). A FAIL there follows Stage 4b's normal retry rules.
-Then do the retry the stage asked for, with Opus. An escalated run never goes back to small.
-
----
-
-## STAGE 0 — Setup
-
-### Claim a branch in {REPO}
-
-Every commit this pipeline makes from here on lands directly in {REPO}, one commit
-per plan step, as the work happens — not copied in at the end. That means {REPO}
-must be clean before anything starts.
+Run from the orchestrator root (the folder that holds this `.claude/`), with the Bash timeout
+set to 600000 ms for every `orch.py` call:
 
 ```bash
-DIRTY=$(git -C "{REPO}" status --porcelain)
+python3 .claude/scripts/orch.py start --repo "{REPO}" --task "{TASK}" [--size small|full] [--unattended]
 ```
 
-**If `$DIRTY` is non-empty:** STOP. Tell the user:
-"{REPO} has uncommitted changes. This pipeline commits directly to a new branch in
-your repo as it works, so it needs a clean tree to start from. Commit or stash your
-changes, then re-run."
-Do not create a run folder. Do not proceed any further.
+It checks that REPO is clean, claims the branch `orchestrator/{RUN_ID}`, creates the run folder and
+digest, and prints the first instruction. If it prints an `ask` about the starting branch, ask the
+user and re-run `start` with `--base continue` or `--base switch`, as its `then` says.
 
-**If clean, check the starting point.** The new branch is cut from whatever {REPO}
-has checked out, so starting from an old, unmerged branch silently stacks this run
-on top of that branch's work:
+## The loop
+
+Every `orch.py` call prints one JSON instruction. First show the user its `say` lines, if any
+(verbatim; they include the Interface Contract, the run size, the Verify table). Then:
+
+- **`spawn`**: spawn a subagent with the Agent tool: `subagent_type` = `agent`, the `prompt`
+  exactly as given (don't add to it or paste files into it), and `model` when it isn't null. Wait
+  for its final report. Write that report, verbatim and complete, to `result_file` (relative to the
+  orchestrator root), then run `then`.
+- **`ask`**: ask the user `question`. With `options`, use AskUserQuestion with those options
+  (the user can always answer in their own words). Write their answer verbatim to `answer_file`,
+  then run `then`. Never answer on the user's behalf. If they don't answer in this session, stop:
+  the run stays paused and `/resume-orchestration {RUN_ID}` asks again.
+- **`do`**: a small task for you (e.g. trim the repo digest). Do it, then run `then`.
+- **`continue`**: a long mechanical step just finished. Run `then`.
+- **`stop`**: show `message` to the user and end. If it has a `followup`, do that first (see
+  "Stage 7: gotchas").
+
+`then` is always one of:
 
 ```bash
-CURRENT=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
-DEFAULT=$(git -C "{REPO}" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
-[ -z "$DEFAULT" ] && DEFAULT=$(git -C "{REPO}" rev-parse --verify --quiet main >/dev/null && echo main || echo master)
-echo "current=$CURRENT default=$DEFAULT"
-git -C "{REPO}" log --oneline "$DEFAULT..$CURRENT" | head -10
+python3 .claude/scripts/orch.py result {RUN_ID} {stage} {file}
+python3 .claude/scripts/orch.py next {RUN_ID}
 ```
 
-If `$CURRENT` starts with `orchestrator/`, or is not `$DEFAULT` and has commits that
-`$DEFAULT` doesn't (the log above is non-empty): **stop and ask the user** before
-creating anything. Show them the branch and those commits: "{REPO} is on `$CURRENT`,
-not `$DEFAULT`. This run would be built on top of these N unmerged commits. Continue
-from `$CURRENT`, or should I switch to `$DEFAULT` first?" If they choose `$DEFAULT`, run
-`git -C "{REPO}" checkout "$DEFAULT"` and continue. Unattended (no one to ask): stop
-with that message rather than guessing.
-
-Then:
-```bash
-RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
-ORIGINAL_BRANCH=$(git -C "{REPO}" rev-parse --abbrev-ref HEAD)
-BRANCH="orchestrator/$RUN_ID"
-git -C "{REPO}" checkout -B "$BRANCH"
-echo "$RUN_ID / $BRANCH (from $ORIGINAL_BRANCH)"
-```
-
-{REPO} is now checked out on `{BRANCH}` and stays checked out on it for the rest of
-the run — every later stage commits into it directly, in place. Nothing is ever
-force-pushed or rewritten upstream, and `{ORIGINAL_BRANCH}` is never touched.
-
-### Create run folder
-
-```bash
-mkdir -p "$ORCHESTRATOR_ROOT/runs/$RUN_ID/archive"
-echo "$RUN_ID"
-```
-
-### Write state.md
-
-Write `runs/{RUN_ID}/state.md`:
-
-```
-run_id: {RUN_ID}
-task: {TASK}
-repo: {REPO}
-original_branch: {ORIGINAL_BRANCH}
-target_branch: {BRANCH}
-step: init
-status: running
-timestamp: {TIMESTAMP}
-last_artifact:
-pause_reason:
-retry_count: 0
-verify_retries: 0
-render_retries: 0
-coder_slices_done: 0
-size: pending
-size_override: {small | full | empty}
-size_reasons:
-```
-
-(`render_config_ref:` is an optional extra line. When set, Stage 6c reads the repo's render
-config from that git ref instead of `{ORIGINAL_BRANCH}`, for runs whose base predates the
-config. Only the user sets it, and it's logged in `report.md`.)
-
-### Write report.md
-
-Write `runs/{RUN_ID}/report.md`:
-
-```
-# Run Report: {RUN_ID}
-
-**Task:** {TASK}
-**Repo:** {REPO}
-**Branch:** {BRANCH} (from {ORIGINAL_BRANCH})
-**Started:** {TIMESTAMP}
-
----
-
-## Stage log
-```
-
-### Generate repo digest
-
-```bash
-bash .claude/scripts/repo-digest.sh "{REPO}" "{RUN_ID}" "{TASK}"
-```
-
-If the digest warns it is large (>2000 tokens), trim the file list section before continuing.
-
-Tell the user: "Run `{RUN_ID}` started on branch `{BRANCH}` in {REPO}. Repo digest ready. Starting pipeline..."
-
----
-
-## STAGE 1 — Product Agent
-
-Update `runs/{RUN_ID}/state.md`: set `step: product`, `status: running`.
-
-**Run subagent `orch-product`** (see "How to run a subagent stage"). Handle `NEEDS_INPUT` as described there.
-
-On `status: DONE`, confirm `runs/{RUN_ID}/prd.md` exists. Update `state.md`: `step: architect`, `last_artifact: runs/{RUN_ID}/prd.md`, `timestamp`. Tell the user the PRD is written, with the RESULT's one-sentence summary.
-
-- If the run is still paused for questions (the user didn't answer in this session): stop. Tell the user:
-  "Pipeline paused at **product** stage. Answer the questions above (here, or later with
-  `/resume-orchestration {RUN_ID} --from product`)."
-  Do not continue.
-
-- If `prd.md` exists and `status: running`: continue to Stage 2.
-
----
-
-## STAGE 2 — Architect Agent
-
-Update `runs/{RUN_ID}/state.md`: set `step: architect`, `status: running`.
-
-**Run subagent `orch-architect`** (see "How to run a subagent stage"). Handle `NEEDS_INPUT` as described there.
-
-On `status: DONE`, confirm `runs/{RUN_ID}/plan.md` exists and that `repo-digest.md`'s `## Test command` is not `UNKNOWN`. Then validate the machine-readable contract (mechanical, no LLM):
-
-```bash
-python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
-```
-
-It checks `runs/{RUN_ID}/contract.json` against its schema, against plan.md's Files changed
-table (they must list the same files), and against the repo: `create` files must not exist
-yet, `modify` files must, every `existing` testid must really be in the file it names, new
-testids must live in coder-owned files, and new packages need a `package.json` in the files.
-Then check the plan's `## Decisions` section (the input for Stage 6d's ADRs):
-
-```bash
-python3 .claude/scripts/check-adr.py "{RUN_ID}" plan
-```
-
-- Both exit 0: continue.
-- Exit 1 or 3 from either (violations, or contract.json missing): re-run the Architect with them as
-  `FEEDBACK` ("Fix contract.json/plan.md so `check-contract.py validate` and `check-adr.py plan` pass: {violations}").
-  At most 2 such retries, counted together; then stop and show the user the violations.
-
-Once both are clean, **size the run** (mechanical, no LLM; see "Run size"):
-```bash
-python3 .claude/scripts/size-run.py "{RUN_ID}" "{REPO}"
-```
-Exit 0 is small, exit 1 is standard. Write the first line's value to `size` in `state.md` and the
-reason lines to `size_reasons`, and record `[size] {small|standard} — {reasons}` in `report.md`.
-Exit 3 (setup error): record it and treat the run as standard. Tell the user the size in one line
-together with the Interface Contract below.
-
-Update `state.md`: `step: tester`, `last_artifact: runs/{RUN_ID}/plan.md`, `timestamp`. Show the user the Interface Contract the subagent pasted below its RESULT block, and the Test command, so they can spot problems before the Tester runs.
-
-- If the run is still paused for questions: stop. Tell the user:
-  "Pipeline paused at **architect** stage. Answer the questions above (here, or later with
-  `/resume-orchestration {RUN_ID} --from architect`)."
-  Do not continue.
-
-- If `plan.md` exists and `status: running`: continue to Stage 3.
-
----
-
-## STAGE 3 — Tester Agent
-
-Update `runs/{RUN_ID}/state.md`: set `step: tester`, `status: running`, `retry_count: 0`.
-**Exception:** if you are re-entering this stage as a retry (from Stage 4a or 4b), do NOT reset `retry_count` — it must keep the value the retry logic just incremented, or the retry cap can never trip.
-
-**Run subagent `orch-tester`** (see "How to run a subagent stage"). On a retry, pass the violations or reviewer failures as `FEEDBACK`.
-
-On `status: DONE`: run the scope check (step 5 of the procedure). If the RESULT lists any CONTRACT_GAPs, show them to the user; they may want to resume from architect to fill them. Update `state.md`: `step: test-reviewer`, `last_artifact: runs/{RUN_ID}/tests/`, `timestamp`.
-
-### Commit the tests to {REPO}
-
-Tests are the first thing that lands in the target repo — written and committed
-before any implementation exists, directly on `{BRANCH}`.
-
-**First, check the file paths** (mechanical, before anything touches {REPO}):
-```bash
-python3 .claude/scripts/check-paths.py "{RUN_ID}" tests --prune
-```
-Every file under `runs/{RUN_ID}/tests/` must be a test file declared in plan.md's
-Files changed table, at the same repo-relative path (`tests/` mirrors the repo root,
-so repo file `tests/foo.test.ts` is `runs/{RUN_ID}/tests/tests/foo.test.ts`).
-`--prune` moves leftovers from an earlier attempt to `archive/strays-*`.
-- Exit 1 (violations): nothing is copied. Append them to `report.md` and treat them
-  exactly like a Stage 4a contract violation: re-run the Tester with them as `FEEDBACK`,
-  under the same retry cap.
-- Exit 3: plan.md has no Files changed table. Stop and resume from architect.
-
-**Then copy, auto-fix and commit:**
-```bash
-cp -r "runs/{RUN_ID}/tests/." "{REPO}/"
-python3 .claude/scripts/autofix.py "{REPO}" "{RUN_ID}" tests
-git -C "{REPO}" add -A
-```
-`autofix.py` runs the repo's auto-fixer (usually `eslint --fix`) on these files only
-and copies the fixed versions back into `runs/{RUN_ID}/tests/`, so the run folder, the
-repo and what the reviewer reads stay identical. It never blocks; append its output
-line to `report.md`.
-
-If nothing is staged (`git -C "{REPO}" diff --cached --quiet` exits 0 — only happens if a
-retry produced byte-identical tests), skip the commit. Otherwise, read `retry_count`
-from `runs/{RUN_ID}/state.md`: `0` means this is the first attempt, `>0` means a
-fix pass triggered by Stage 4a/4b below.
-
-```bash
-git -C "{REPO}" commit -m "{MSG}
-
-Run: {RUN_ID}"
-```
-
-Where `{MSG}` is:
-- `retry_count` is `0`: `test: {TASK}` (plus a short body: "Written test-first, before any implementation. Not yet reviewed — subject to the mechanical contract gate and the test-reviewer.")
-- `retry_count` is `>0`: `fix tests: {TASK} (retry {retry_count}/2)`
-
-Continue to Stage 4.
-
----
-
-## STAGE 4 — Contract Gate + Test-Reviewer
-
-Update `runs/{RUN_ID}/state.md`: set `step: test-reviewer`, `status: running`.
-
-### Stage 4a — Mechanical contract check (runs first, no LLM, no cost)
-
-```bash
-if [ -f "runs/{RUN_ID}/contract.json" ]; then
-  python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" tests
-else
-  bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}"   # older runs without contract.json
-fi
-CONTRACT_EXIT=$?
-```
-With `contract.json` the check is exact: every testid a test uses must be declared there
-(new, existing, a template instance, test_only or removed), every import must resolve to a
-repo file or a contract file, every package must be a dependency or in `packages.added`,
-and network calls must be mocked. Its violations are real, never "known false positives".
-
-**If `CONTRACT_EXIT` is non-zero (violations found):**
-
-Do **not** run the LLM Test-Reviewer — a mechanical violation is not a judgment call. Append the script's output (one violation per line) to `runs/{RUN_ID}/report.md` under:
-```
-[check-contract] FAIL — {N} violation(s), returning to Tester (retry {N}/2)
-
-{script output, verbatim}
-```
-
-Read `retry_count` from state.md.
-
-- If `retry_count >= 2` → Stop. Tell the user:
-  "Contract check retry cap reached (2/2). Human intervention required.
-  Review `runs/{RUN_ID}/report.md` for the violations, fix the tests manually or run:
-  `/resume-orchestration {RUN_ID} --from tester`
-  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
-  Do not continue.
-
-- If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
-  "Mechanical contract check failed. Retrying Tester with violations as feedback (attempt {retry_count}/2)..."
-
-  Archive the current tests:
-  ```bash
-  cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}
-  ```
-
-  Re-run Stage 3 (Tester) **without resetting retry_count** (see Stage 3 exception), with `FEEDBACK`:
-  "The mechanical contract check failed with these violations: {VIOLATIONS}. Fix every one before writing the new tests — these are not style suggestions, they are exact name/path/package mismatches. Check memory.md's check-contract false-positive list first; if a violation is a known false positive, handle it as that list says."
-
-  Then re-run Stage 4 from Stage 4a.
-
-**If `CONTRACT_EXIT` is 0 (clean):** continue to Stage 4b.
-
-### Stage 4b — LLM Test-Reviewer (judgment calls only: assertion quality, coverage)
-
-**Small run:** if `size: small` in `state.md`, skip this review. Record
-`[test-reviewer] SKIPPED — small run (mechanical check 4a passed)` in `report.md`, update
-`state.md` (`step: coder`, `status: running`), stamp the gate exactly as on PASS
-(`touch "runs/{RUN_ID}/.test_reviewer_passed_at"`) so Stage 5b still detects any later test edit,
-and continue to Stage 5. If the run escalates later, this review runs then (see "Run size").
-
-**Full review or delta review** (mechanical, no LLM). Only the first review of a run reads every
-test; later passes (after a FAIL retry, a Verify lint fix, a sandbox fix) judge only what changed:
-```bash
-python3 .claude/scripts/review-delta.py "{RUN_ID}" "{REPO}" diff
-```
-- Exit 1 (full review: first review of the run, or the tests changed too much to judge from a
-  diff): run the reviewer as usual.
-- Exit 0 (delta review): run the reviewer with `NOTE` starting `REVIEW_MODE: delta`, followed by
-  the script's summary line and, if the last review was a FAIL, its `failures:` list ("check each is
-  fixed"), then any note of your own (e.g. "this pass only fixes lint errors").
-- Exit 2 (no test changes since a PASS review): don't run the reviewer. Record
-  `[test-reviewer] NOT NEEDED — tests unchanged since the last PASS` and continue as on PASS.
-- Exit 3: record the error and run a full review.
-Coming here from a Stage 6 timeout, skip the script and always run a full review (the timeout
-note asks for a sweep of every test).
-
-**Run subagent `orch-test-reviewer`** (see "How to run a subagent stage"). It runs in a fresh context with read-only tools, so it judges tests it did not write. If you came here from a Stage 6 timeout, pass that stage's note as `NOTE`.
-
-After every review, PASS or FAIL, record what it saw, so the next pass can be a delta:
-```bash
-python3 .claude/scripts/review-delta.py "{RUN_ID}" "{REPO}" mark {PASS|FAIL}
-```
-
-Record its RESULT in `report.md` verbatim (verdict, checklist, failures, contract gaps). **Only you change `state.md` and `retry_count`**; the reviewer never does. That keeps each rejection counted exactly once.
-
-**If `verdict: FAIL` (reviewer rejected the tests):**
-
-Read `retry_count` from state.md.
-
-- If `retry_count >= 2` → Stop. Tell the user:
-  "Test-reviewer retry cap reached (2/2). Human intervention required.
-  Review `runs/{RUN_ID}/report.md` for the feedback, fix the tests manually or run:
-  `/resume-orchestration {RUN_ID} --from tester`
-  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
-  Do not continue.
-
-- If `retry_count < 2` → increment `retry_count` in state.md. Tell the user:
-  "Test-reviewer rejected. Retrying Tester with feedback (attempt {retry_count}/2)..."
-
-  The feedback is the `failures:` list from the reviewer's RESULT block.
-  Archive the current tests:
-  ```bash
-  cp -r runs/{RUN_ID}/tests runs/{RUN_ID}/archive/tests_v{retry_count}
-  ```
-
-  Re-run Stage 3 (Tester) **without resetting retry_count** (see Stage 3 exception), with `FEEDBACK`:
-  "The previous test attempt was rejected by the test-reviewer with this feedback: {FAILURES}. Fix the issues listed before writing the new tests."
-
-  Then re-run Stage 4 from Stage 4a (the contract check must pass again against the rewritten tests).
-
-**If `verdict: PASS` (reviewer approved):**
-
-Update `state.md`: `step: coder`, `status: running`. Show the user any contract gaps the reviewer listed as advisory items.
-
-The `mark PASS` above also stamped the gate (`runs/{RUN_ID}/.test_reviewer_passed_at`), so the
-post-Coder check can detect any test file edited after this point. (When the review was NOT NEEDED,
-stamp it yourself: `touch "runs/{RUN_ID}/.test_reviewer_passed_at"`.)
-
-Continue to Stage 5.
-
----
-
-## STAGE 5 — Coder Agent
-
-Update `runs/{RUN_ID}/state.md`: set `step: coder`, `status: running`, `retry_count: 0`.
-**Exception:** if you are re-entering this stage as a retry (from Stage 5b or Stage 6), do NOT reset `retry_count` — it must keep the value the retry logic just incremented, or the retry cap can never trip.
-
-**Seed the files the Coder modifies** (mechanical, before every Coder pass, first or retry):
-```bash
-python3 .claude/scripts/seed-code.py "{RUN_ID}" "{REPO}"
-```
-It copies the current repo version of every Coder-owned MODIFY file (from `contract.json`) into
-`runs/{RUN_ID}/code/`, and never overwrites a file already there (on a retry that's the Coder's
-previous version, which is also what's committed). The Coder edits these copies in place instead
-of re-typing whole files. It also writes `runs/{RUN_ID}/generated.json`: the MODIFY files that are
-generated (by the repo's `verify.json` `generated` list, or a "Generated by `cmd` ... do not edit"
-header), which the Coder leaves alone and `regen.py` rebuilds after the pass. Exit 3 (a declared MODIFY file is missing from {REPO}): record it in
-`report.md`, set `status: paused`, `pause_reason: contract-mismatch`, and stop as for
-`CONTRACT_MISMATCH` below.
-
-**Slice the first pass** (mechanical). On a large run, one Coder holding every file re-sends all
-of it on every call, so the **first** pass runs in slices, each a fresh Coder with only its own
-files and tests. Only on the first pass (`retry_count: 0` and `render_retries: 0`):
-```bash
-python3 .claude/scripts/coder-slices.py plan "{RUN_ID}" "{REPO}"
-```
-- **Exit 1** (one pass is enough: at most 12 files and 250 KB of modified files): run the Coder
-  once, as below.
-- **Exit 0** (N slices in `runs/{RUN_ID}/coder-slices.json`, in dependency order: data & core,
-  then app & UI, then content & docs): for k = 1..N, strictly one after another:
-  1. `python3 .claude/scripts/coder-slices.py set "{RUN_ID}" {k}` (the write guard then blocks
-     files of later slices).
-  2. Run subagent `orch-coder` with `NOTE`: `SLICE {k}/{N} ({label}): implement only this slice's
-     files; see runs/{RUN_ID}/coder-slices.json.`
-  3. `CONTRACT_MISMATCH` → as below (stop; set the slice marker back with `set "{RUN_ID}" 0`).
-     `DONE` → record `[coder] slice {k}/{N} DONE — {n} files` in `report.md`, append its
-     deviations (heading `## Coder pass 0, slice {k}/{N}`), and set `coder_slices_done: {k}` in
-     `state.md`. Don't run the scope check, path check or commits between slices.
-  After the last slice: `python3 .claude/scripts/coder-slices.py set "{RUN_ID}" 0`, then handle
-  the pass as one `DONE` below (scope check, path check, commits), covering every slice's files.
-- **Every other pass** (any retry: Stage 5b, sandbox, Verify, render review) is a single pass:
-  run `python3 .claude/scripts/coder-slices.py set "{RUN_ID}" 0` first.
-
-**Run subagent `orch-coder`** (see "How to run a subagent stage"). On a retry, pass the sandbox failure output or check-contract violations as `FEEDBACK`.
-
-- `status: CONTRACT_MISMATCH` → append its `detail` to `report.md`, set `status: paused`, `pause_reason: contract-mismatch` in `state.md`, and handle it as described at the end of this stage (no commits for this pass).
-- `status: DONE` → run the scope check (step 5 of the procedure), then the path check:
-  `python3 .claude/scripts/check-paths.py "{RUN_ID}" code`. Violations (a declared file
-  missing, an undeclared file, or a test file written by the Coder) are a Coder failure:
-  append them to the report and treat them like a Stage 5b violation (Coder retry with
-  them as `FEEDBACK`, same cap). Only when it's clean, commit as below. If its `notes` suspect an environment issue (Test command, generated client, shared build), surface that to the user; the fix may belong in `repo-digest.md`'s Test command, not in the code.
-
-**Deviations.** If the RESULT's `deviations` is anything but `none`, append it to
-`runs/{RUN_ID}/deviations.md` under a heading for this pass (`## Coder pass {retry_count}`,
-or `## Coder pass render-{render_retries}` on a render-review retry), verbatim, and to
-`report.md`. Never create the file for a pass with no deviations: Stage 6d treats an absent or
-empty file as "the code follows the plan".
-
-### Commit the implementation to {REPO}
-
-One mechanical call does the whole step: it copies `runs/{RUN_ID}/code/` into {REPO}, runs
-`autofix.py` (lint --fix) and `regen.py` (rebuilds generated files such as a translation review
-table, and copies them back into `code/`), updates the lockfile if a `package.json` changed, and
-commits. Read `retry_count` from `state.md` once:
-
-- `retry_count` is `0` (first pass): **logical commits**, one per group in `contract.json`'s
-  `commits`, in that order (groups with no change are skipped):
-  ```bash
-  python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}"
-  ```
-- `retry_count` is `>0` (a fix pass after Stage 5b, the sandbox, Verify or the render review):
-  **one** commit for the whole pass, with a summary of what it fixes:
-  ```bash
-  python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}" --fix "{what this pass fixes, a few words} (retry {retry_count}/2)"
-  ```
-
-Append its output (one line per commit, plus any autofix/regen/WARNING lines) to `report.md`.
-Exit 1 means a git step failed: show the message and stop with `status: failed`,
-`pause_reason: commit-failed`. A `WARNING` about files in no planned commit or uncommitted
-changes outside the run is worth showing the user, but isn't a stop. Tests are never part of
-these commits: Stage 3 committed them first, on their own.
-
-- If the Coder returned `CONTRACT_MISMATCH` (`pause_reason: contract-mismatch`) → Stop. Tell the user:
-  "Pipeline paused: CONTRACT_MISMATCH detected. The Interface Contract needs correction.
-  Run: `/resume-orchestration {RUN_ID} --from architect`
-  See `runs/{RUN_ID}/report.md` for details.
-  Whatever was already committed this pass is on `{BRANCH}` in {REPO}."
-  Do not continue.
-
-- Otherwise → continue to Stage 5b.
-
----
-
-## STAGE 5b — Code Contract Gate
-
-Mechanical post-Coder check — catches a testid the Coder dropped, or tests that
-were edited after the reviewer already passed them, before spending a sandbox run.
-
-```bash
-if [ -f "runs/{RUN_ID}/contract.json" ]; then
-  python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" code
-else
-  bash .claude/scripts/check-contract.sh "{RUN_ID}" "{REPO}" --code   # older runs
-fi
-CODE_CONTRACT_EXIT=$?
-```
-
-**If `CODE_CONTRACT_EXIT` is 0 (clean):** continue to Stage 6.
-
-**If violations include `TESTS_MODIFIED_AFTER_REVIEW`:**
-
-STOP immediately — this means a test file changed after the test-reviewer gate
-already approved it, which is exactly the run-1 defect this gate exists to catch.
-Update `runs/{RUN_ID}/state.md`: `status: failed`, `pause_reason: tests-modified-after-review`.
-Append the violation(s) to `runs/{RUN_ID}/report.md`. Tell the user:
-"Tests were modified after the test-reviewer approved them. This requires human review —
-run `/resume-orchestration {RUN_ID} --from tester` once you've decided how to proceed.
-Whatever was already committed this pass is on `{BRANCH}` in {REPO}."
-Do not continue, and do not retry automatically.
-
-**If the violations are only Coder defects** (`MISSING_TESTID_IN_CODE`, `MISSING_EXPORT`,
-`EXISTING_TESTID_REMOVED`; no test-edit violation):
-
-This is a Coder defect, not a test problem — route back to the Coder without
-spending a sandbox run. Append the violations to `runs/{RUN_ID}/report.md` under:
-```
-[check-contract --code] FAIL — {N} violation(s), returning to Coder (retry {N}/2)
-
-{script output, verbatim}
-```
-
-Read `retry_count` from state.md.
-
-- If `retry_count >= 2` → Stop. Tell the user:
-  "Code contract check retry cap reached (2/2). Human intervention required.
-  Review `runs/{RUN_ID}/report.md` for the violations, fix the code manually or run:
-  `/resume-orchestration {RUN_ID} --from coder`
-  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
-  Do not continue.
-
-- If `retry_count < 2` → increment `retry_count`. Tell the user:
-  "Coder dropped a contract testid. Retrying Coder with the violation as feedback (attempt {retry_count}/2)..."
-
-  Archive current code:
-  ```bash
-  cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
-  ```
-
-  Re-run Stage 5 (Coder) **without resetting retry_count** (see Stage 5 exception) with `FEEDBACK: {VIOLATIONS}`.
-  Then re-run Stage 5b.
-
----
-
-## STAGE 6 — Test Sandbox
-
-Update `runs/{RUN_ID}/state.md`: set `step: sandbox`, `status: running`.
-
-`run-tests.sh` reads the test command from `runs/{RUN_ID}/repo-digest.md`'s `## Test command`
-section itself. Don't copy the command by hand: pass `-`. It also picks the timeout itself
-(`sandbox-timeout.py`: the repo's `verify.json` `sandbox_timeout`, else twice the slowest of this
-repo's last 5 completed runs, 120-900s, else 120s), so don't pass one. The `- Timeout:` line of its
-report entry says which value it used and why.
-
-Run the sandbox:
-```bash
-bash .claude/scripts/run-tests.sh "{REPO}" "{RUN_ID}" -
-SANDBOX_EXIT=$?
-```
-
-**If exit code 0 (PASS):** continue to Stage 6b.
-
-**If exit code 2 (TIMEOUT):**
-Tell the user: "Tests timed out. Routing back to Test-Reviewer."
-Re-run Stage 4 (Test-Reviewer) with `NOTE`:
-"IMPORTANT: The previous test run timed out after {N}s (the `- Timeout:` line of the latest sandbox entry in report.md). Check all tests for unresolved promises, missing mocks, or real network calls."
-Then re-run Stage 5 and 6 if the reviewer passes.
-
-**If exit code 1 (FAIL):**
-Read `retry_count` from state.md.
-
-- If `retry_count >= 2` → Stop. Tell the user:
-  "Coder retry cap reached (2/2). Human intervention required.
-  Review `runs/{RUN_ID}/report.md` for the test failure output, then run:
-  `/resume-orchestration {RUN_ID} --from coder`
-  Partial progress is already committed on `{BRANCH}` in {REPO} if you want to inspect it directly."
-  Do not continue.
-
-- If `retry_count < 2` → increment `retry_count`. Tell the user:
-  "Tests failed. Retrying Coder with failure output as feedback (attempt {retry_count}/2)..."
-
-  The failure output is the latest sandbox entry in `runs/{RUN_ID}/report.md` (summary and the
-  last 120 lines); the complete output is in the log file it names (`runs/{RUN_ID}/sandbox-logs/`).
-  Put the summary and tail in `FEEDBACK` and add: "Full test output: {log path}". The Coder can read it.
-  Archive current code:
-  ```bash
-  cp -r runs/{RUN_ID}/code runs/{RUN_ID}/archive/code_v{retry_count}
-  ```
-
-  Re-run Stage 5 (Coder) **without resetting retry_count** (see Stage 5 exception) with `FEEDBACK: {FAILURE_OUTPUT}`.
-  Then re-run Stage 6.
-
-**If exit code 3 or any other unlisted code (ERROR):**
-(This includes an invalid Test command: `run-tests.sh` refuses a blank, `UNKNOWN` or
-fenced value instead of running it. In that case the fix is `repo-digest.md`'s
-`## Test command` section, not the code; tell the user which.)
-STOP immediately. Update state.md: status: failed, pause_reason: sandbox-infrastructure-error.
-Tell the user the sandbox environment is broken and show the report entry. Mention
-that whatever was already committed is on `{BRANCH}` in {REPO}, untouched by this
-failure — only the disposable sandbox worktree is affected.
-You must NOT manually replicate the sandbox, run tests yourself, or declare
-PASS/FAIL by any other means. The sandbox exit code is the only accepted verdict.
-
----
-
-## STAGE 6b — Verify
-
-The sandbox proved the new tests pass. Verify checks the **committed branch** the
-way CI and the deploy will: a fresh worktree of `{BRANCH}`, a frozen-lockfile
-install, and every step in the target repo's `.claude/verify.json` (lint,
-typecheck, builds, **all** test suites, migrations against a throwaway database,
-e2e), plus the task-specific commands from plan.md's ```` ```verify ```` block. The
-config is read from `{ORIGINAL_BRANCH}`, so a run can't weaken its own checks. Any
-step that fails is re-run on `{ORIGINAL_BRANCH}`; if it fails there too, it's
-reported as PRE-EXISTING and doesn't block. If the branch adds migrations and Neon
-credentials are available, it also applies them to a temporary Neon branch (a copy
-of the real data), then deletes that branch.
-
-Update `state.md`: `step: verify`, `status: running`.
-
-```bash
-python3 .claude/scripts/verify.py "{REPO}" "{RUN_ID}"
-VERIFY_EXIT=$?
-```
-
-It writes `runs/{RUN_ID}/verify.md` (summary, failures, production follow-ups) and
-per-step logs in `runs/{RUN_ID}/verify-logs/`, and appends the summary table to
-`report.md`. The exit code is the verdict. As with the sandbox, never run the checks
-yourself or override the result.
-
-**0 (PASS):** continue to Stage 6c.
-
-**1 (FAIL):** a check fails because of this run. Show the user the table from
-`verify.md`, then route each problem to whoever owns the file. The machine-readable
-summary at the end of `verify.md` has `new_errors_by_file` (repo file → its new error
-lines) and `failed_steps_without_file_info` (failed steps whose output names no file,
-e.g. a failing e2e suite).
-
-- **Lockfile** (install step with the lockfile hint): fix it with
-  `python3 .claude/scripts/commit-code.py "{REPO}" "{RUN_ID}" --lockfile`, then re-run Stage 6b.
-  This doesn't count as a retry.
-- **Otherwise**, read `verify_retries` from `state.md` (missing counts as 0). If it is `>= 2`, stop and tell the
-  user (show the failures; they can fix by hand and `/resume-orchestration {RUN_ID} --from verify`,
-  or resume from tester/coder). If it is `< 2`, increment it and split the problems:
-  - **Tester-owned:** files in `new_errors_by_file` that exist under `runs/{RUN_ID}/tests/`.
-  - **Coder-owned:** every other file in `new_errors_by_file`, plus every step in
-    `failed_steps_without_file_info`.
-
-  1. If there are Tester-owned problems: archive `tests/`, re-run **Stage 3** with `FEEDBACK` =
-     those files' error lines verbatim, plus: "These are lint/type errors from Verify. Fix only
-     these; don't change what any test asserts." Then **Stage 4** (4a, then 4b with
-     `NOTE`: "This pass only fixes lint/type errors from Verify; confirm no assertion was
-     weakened, removed or loosened."). Stage 4's usual retry rules apply.
-  2. If there are Coder-owned problems: archive `code/`, re-run **Stage 5** with `FEEDBACK` =
-     those errors (and the failing steps' sections from `verify.md`). If there are none, skip
-     Stage 5: the implementation is already committed and unchanged.
-  3. Then Stage 5b → 6 → 6b → 6c as usual.
-
-  Never move a Tester-owned problem to the Coder or the other way round: the Coder can't
-  edit tests, and the Tester can't edit code.
-
-**3 (ERROR):** infrastructure (worktree, Docker start, etc.), not a code verdict.
-Set `status: failed`, `pause_reason: verify-infrastructure-error`, show the error, stop.
-
-**4 (INCOMPLETE):** nothing failed, but required checks couldn't run (usually: no
-Docker, so the database steps were skipped). Set `status: paused`,
-`pause_reason: verify-incomplete`, and show the "Not verified" list. The user can:
-- start Docker (or export `VERIFY_DATABASE_URL` pointing at a local throwaway
-  Postgres) and run `/resume-orchestration {RUN_ID} --from verify`, or
-- explicitly accept the gap by telling you so in this session. Then record
-  `[verify] ACCEPTED UNVERIFIED by user: {list}` in `report.md` and continue to
-  Stage 6c (the gap is repeated in Stage 7's final summary). Never accept it on the
-  user's behalf.
-
----
-
-## STAGE 6c — Render review
-
-Every test passed and Verify is clean, but nothing has looked at the **composed page**.
-This stage opens the pages the run changed in a real browser (the Architect's
-`render_targets` in `contract.json`), on the branch and on `{ORIGINAL_BRANCH}`, and a
-reviewer judges the before/after screenshots against the PRD. The capture is mechanical
-and its exit code says whether the pages could be reached; only the reviewer judges
-what's on them. The repo's render config (`render` section of `.claude/verify.json`, the
-sign-in and seed hook under `.claude/render/`) is read from `{ORIGINAL_BRANCH}`, or from
-`render_config_ref` in `state.md` when set, so a run can't edit its own setup.
-
-Update `state.md`: `step: render`, `status: running`.
-
-**Capture** (throwaway worktrees and dev servers; your checkout is never touched):
-```bash
-node .claude/scripts/render-capture.mjs "{REPO}" "{RUN_ID}"
-RENDER_EXIT=$?
-```
-It writes `runs/{RUN_ID}/render/` (`summary.json`, `after/`, `before/`, `logs/`) and appends a
-table to `report.md`. As with the sandbox and Verify, never capture by hand or override the result.
-
-- **2 (SKIPPED):** the repo has no render config, or no targets were declared. Record
-  `[render] SKIPPED — {reason from summary.json}` in `report.md` and continue to Stage 6d.
-  SKIPPED is never PASS, and Stage 7's summary must say so.
-- **1 (INCOMPLETE):** a target couldn't be reached on the branch (a login redirect, the
-  `ready` element never appeared, an unknown fixture). Set `status: paused`,
-  `pause_reason: render-incomplete` and show the reasons from `summary.json`. The user can fix the
-  cause and run `/resume-orchestration {RUN_ID} --from render`, or explicitly accept the gap in
-  this session; then record `[render] ACCEPTED UNREVIEWED by user: {reasons}` in `report.md` and
-  continue to Stage 6d; Stage 7 repeats the gap. Never accept it on the user's behalf.
-- **3 (ERROR):** infrastructure (worktree, install, dev server, browser). Set `status: failed`,
-  `pause_reason: render-infrastructure-error`, show the error and the dev-server logs in
-  `runs/{RUN_ID}/render/logs/`, stop.
-- **0 (CAPTURED):** run the reviewer.
-
-**Run subagent `orch-render-reviewer`** (see "How to run a subagent stage"). On a retry pass,
-first move the previous `render-review.md` to `archive/render-review_v{render_retries}.md`.
-Confirm `runs/{RUN_ID}/render-review.md` exists, then record its RESULT in `report.md`
-verbatim (verdict, blocking, notes). Only you change `state.md` and the counters.
-
-**`verdict: PASS`** (no BLOCKING findings): the NOTEs go into `report.md` only. Continue to Stage 6d.
-
-**`verdict: FAIL`** (at least one BLOCKING finding): read `render_retries` from `state.md`
-(missing counts as 0).
-- If it is `>= 2`, stop. Show the BLOCKING findings and tell the user: "Render-review retry cap
-  reached (2/2). Human intervention required. See `runs/{RUN_ID}/render-review.md` and the
-  screenshots in `runs/{RUN_ID}/render/`. Fix by hand and run
-  `/resume-orchestration {RUN_ID} --from render`, or resume from coder."
-- If it is `< 2`, increment `render_retries`. Tell the user: "Render review found
-  {N} blocking problem(s). Sending them to the Coder (attempt {render_retries}/2)..." Archive
-  `code/` to `archive/code_render_v{render_retries}`, then re-run **Stage 5** with `FEEDBACK` =
-  the RESULT's `blocking:` list verbatim, plus: "Full review with screenshots:
-  runs/{RUN_ID}/render-review.md and runs/{RUN_ID}/render/. These are problems in the rendered
-  page, not test failures. Fix only what is listed; don't change what any test asserts. If a fix
-  can't be made without changing a reviewed test, return CONTRACT_MISMATCH." For this pass set
-  `retry_count: 1` instead of resetting it to 0, so the commits are `fix:` commits and Stages
-  5b and 6 keep one retry. Then Stage 5b → 6 → 6b → 6c again (6c recaptures the branch; the
-  original branch's capture is cached).
-
-  Findings always go to the Coder, never the Tester. A `CONTRACT_MISMATCH` from the Coder takes
-  the usual Stage 5 path (pause, resume from architect or tester).
-
----
-
-## STAGE 6d — ADR
-
-The change is final. This stage records the decisions it shipped as Architecture Decision
-Records in `{REPO}/docs/adr/`, committed on `{BRANCH}` so they're reviewed in the PR with
-the code. Sources: plan.md's `## Decisions`, the user's `answers-*.md`, and whatever
-`report.md` shows changed after planning, checked against the shipped diff. ADRs are named
-`YYYY-MM-DD-slug.md` (the run's date), so parallel branches never fight over numbers.
-
-**This stage never fails the run.** A missing ADR is a documentation gap, not a broken
-change: if it can't produce a clean result, record that and continue to Stage 7, which
-puts it on the handoff checklist.
-
-Update `state.md`: `step: adr`, `status: running`. If `runs/{RUN_ID}/adr/` exists from an
-earlier pass, move it to `archive/adr_v{n}/` first.
-
-**Skip the writer when there's nothing to record** (mechanical, no LLM):
-```bash
-python3 .claude/scripts/check-adr.py "{RUN_ID}" trivial
-```
-- Exit 0 (trivial: plan.md's `## Decisions` is `None` or all `ADR: no`, no `answers-*.md`, no
-  `deviations.md`): record `[adr] NONE — trivial run, writer not run` in `report.md` and
-  continue to Stage 7.
-- Exit 1 (it prints why it isn't trivial) or 3: run the writer.
-
-**Run subagent `orch-adr-writer`** (see "How to run a subagent stage").
-
-- **`status: NONE`:** record `[adr] NONE — {summary}` and its `skipped` list in `report.md`.
-  Continue to Stage 7.
-- **`status: DONE`:** run the scope check (step 5 of the procedure), then the mechanical check:
-  ```bash
-  python3 .claude/scripts/check-adr.py "{RUN_ID}" "{REPO}" adr
-  ```
-  - Exit 1 (violations): re-run the subagent once with them as `FEEDBACK` (archive `adr/`
-    first). If the second pass still fails, record `[adr] NOT WRITTEN — {violations}` in
-    `report.md` and continue to Stage 7 without committing anything.
-  - Exit 3 (setup error): record it the same way and continue to Stage 7.
-  - Exit 0: copy the files in and commit them as one commit:
-    ```bash
-    cp -r "runs/{RUN_ID}/adr/." "{REPO}/"
-    git -C "{REPO}" add docs/adr
-    git -C "{REPO}" diff --cached --quiet || git -C "{REPO}" commit -m "docs(adr): {summary}
-
-    {one line per ADR: docs/adr/{file}}
-
-    Run: {RUN_ID}"
-    ```
-    Record the RESULT in `report.md` (`[adr] DONE`, then the `adrs`, `superseded`, `stale_docs`
-    and `skipped` lists).
-
----
-
-## STAGE 7 — Done
-
-Update `runs/{RUN_ID}/state.md`:
-- Set `step: done`, `status: done`
-- Set `last_artifact: runs/{RUN_ID}/code/`
-- Update `timestamp`
-
-Append to `runs/{RUN_ID}/report.md`:
-```
----
-## Result: PASS ✓
-
-All tests passed. Pipeline complete.
-Render review: {PASS | SKIPPED ({reason}) | ACCEPTED UNREVIEWED ({reasons})}
-Finished: {TIMESTAMP}
-```
-
-Every test and code change has already been committed to `{BRANCH}` in {REPO} as the
-pipeline worked: the tests first, then the logical commits, then any `fix:` commits — there is
-nothing left to copy or apply.
-Collect the commit log for the report:
-
-```bash
-COMMIT_LOG=$(git -C "{REPO}" log --oneline "{ORIGINAL_BRANCH}..{BRANCH}")
-COMMIT_COUNT=$(git -C "{REPO}" rev-list --count "{ORIGINAL_BRANCH}..{BRANCH}")
-```
-
-Append to `runs/{RUN_ID}/report.md`:
-```
-### Commits on {BRANCH} ({COMMIT_COUNT} ahead of {ORIGINAL_BRANCH})
-{COMMIT_LOG}
-```
-
----
-
-Measure the run's **real** token usage from Claude Code's session logs (mechanical, no LLM):
-```bash
-python3 .claude/scripts/run-usage.py "{RUN_ID}"
-```
-It writes `runs/{RUN_ID}/usage.md` and `runs/{RUN_ID}/usage.json` and prints the tables, ending
-with `total_tokens: N | weighted: W`. The figures are the exact counts the API reported, per agent
-and per subagent invocation, including every retry and resumed session; only this final stage's
-last few calls are missing. Show the user the "By agent" table. No dollar figures — tokens only.
-Exit 1 (no transcript found) or 3 (no Claude Code projects folder): say "token usage unavailable"
-with the script's message, and continue. Never fall back to estimating.
-
-Append a one-line entry to `memory.md` under `## Run history`:
-```
-- {RUN_ID} | {DATE} | task: {TASK} | result: PASS | size: {small|standard|small→standard} | tokens: {N} (weighted {W})
-```
-(N and W from `run-usage.py`'s last line; `tokens: unavailable` if it found nothing.)
-
-If this run surfaced a gotcha worth remembering (a naming convention, a config quirk,
-a dependency trap: anything a future Architect/Coder/Tester would otherwise rediscover
-the hard way), first decide **where it belongs**:
-
-- **About the target codebase** (its libraries, test environment, conventions, commands):
-  add it to the best-matching file in `{REPO}/.claude/rules/` (create the folder, or a new
-  topic file with a `paths:` frontmatter scope, if needed). Write it as a short actionable
-  rule: symptom → cause → what to do. Commit it on `{BRANCH}` as its own commit:
-  `docs(rules): {one-line summary}` with body `Run: {RUN_ID}`. It then ships with the
-  change, gets reviewed in the PR, and helps plain Claude sessions in that repo too.
-- **About the pipeline itself** (this orchestrator's scripts, stages, contract checks):
-  append one line to `memory.md` under `## Pipeline gotchas` (or the check-contract
-  section): `- [active] {gotcha}. (added: {RUN_ID})`.
-- **If it corrects an existing entry**, update or retire that entry instead of adding
-  a contradicting one next to it.
-
-Skip this if nothing new was learned; don't pad either file.
-
-If you made a `docs(rules)` commit, re-run the two commit-log commands above so the summary below includes it.
-
-Build the **handoff checklist** for the final message from:
-- `verify.md`: "Production follow-up: database migrations" (migrations that must be
-  applied to production as part of the deploy: coin-collector's Render build doesn't
-  run `prisma migrate deploy`), "Pre-existing failures", and any accepted "Not verified" items
-- plan.md's `## Verification` → "Manual" list (live-DB checks, visual checks, etc.)
-- `render-review.md`'s NOTEs, if any (non-blocking observations; list them, one line each)
-- Stage 6d's `stale_docs` ("update {doc} §{section}: {what is now wrong}"), and `[adr] NOT WRITTEN`
-  if the ADR stage couldn't produce a clean result
-
-Tell the user:
-"✓ Pipeline complete! Tests passed and the branch is verified.
-
-**Run:** {RUN_ID}
-**Branch:** `{BRANCH}` in {REPO} — {COMMIT_COUNT} commit(s) ahead of `{ORIGINAL_BRANCH}`:
-{COMMIT_LOG}
-
-Your previous branch (`{ORIGINAL_BRANCH}`) is untouched — switch back anytime with
-`git checkout {ORIGINAL_BRANCH}`. Everything the pipeline did is already committed on
-`{BRANCH}`; nothing further needs to be applied.
-
-**Verify:** (the table from `runs/{RUN_ID}/verify.md`)
-
-**Render review:** one of
-- `PASS` (n targets × desktop and mobile, before/after; blocking: none; notes: N), with `runs/{RUN_ID}/render-review.md`
-- `SKIPPED: {reason}`. The pages were **not** looked at. Say this plainly; it is not a pass.
-- `ACCEPTED UNREVIEWED by user: {reasons}`. Repeat the gap.
-
-**Run size:** `small` or `standard`, with the reasons from `size_reasons` (including any
-`escalated:` line, or the `--size` override).
-
-**ADRs:** the files Stage 6d committed (one line each: file and title), plus any it marked
-superseded; or `none ({reason})`; or `NOT WRITTEN` with the reason.
-
-**Before you merge / deploy:** (the handoff checklist; say "nothing" if empty)
-
-**Token usage:** (the "By agent" table from `runs/{RUN_ID}/usage.md`, or "unavailable")
-
-**Orchestrator-side artifacts (for reference/audit):**
-- PRD: `runs/{RUN_ID}/prd.md`
-- Plan + Interface Contract: `runs/{RUN_ID}/plan.md`
-- Full report: `runs/{RUN_ID}/report.md`
-- Verify details + logs: `runs/{RUN_ID}/verify.md`, `runs/{RUN_ID}/verify-logs/`
-- Render review + screenshots: `runs/{RUN_ID}/render-review.md`, `runs/{RUN_ID}/render/`
-- ADRs as written (before commit): `runs/{RUN_ID}/adr/`
-- Token usage: `runs/{RUN_ID}/usage.md` (re-measure any time: `python3 .claude/scripts/run-usage.py {RUN_ID}`)"
+`result` records what you handed back and prints the next instruction, so you don't need a
+separate `next` after it. `next` is safe to repeat: while an instruction is outstanding it prints
+the same one again (use it if you lose track).
+
+If `orch.py` exits non-zero, show its stderr to the user and stop. Don't work around it: exit 2 is
+a usage error (usually a result handed to the wrong stage), exit 3 an internal error.
+
+## What orch.py does at each stage (for orientation; it applies the rules, not you)
+
+| Stage | What happens |
+|---|---|
+| 0 Setup | clean-tree check, branch, run folder, `state`, `report.md`, repo digest |
+| 1 Product | `orch-product` → prd.md; `NEEDS_INPUT` pauses with an `ask` |
+| 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate`, `check-adr plan` (2 retries); `size-run.py` |
+| 2b Render config | `render-config.py check`; may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |
+| 3 Tester | `orch-tester`; scope check, `check-paths tests`, autofix, `test:` / `fix tests:` commit |
+| 4 Gate + review | `check-contract tests` (4a), then `orch-test-reviewer` with `review-delta` (4b; skipped on small runs) |
+| 5 Coder | `seed-code`, `coder-slices` on the first pass, `orch-coder`; scope and path checks; `commit-code` |
+| 5b Code gate | `check-contract code`; `TESTS_MODIFIED_AFTER_REVIEW` stops the run |
+| 6 Sandbox | `run-tests.sh`: PASS, FAIL → Coder, TIMEOUT → Test-Reviewer, ERROR → stop |
+| 6b Verify | `verify.py`; failures go to whoever owns the file (tests → Tester, the rest → Coder) |
+| 6c Render | `render-capture.mjs`, then `orch-render-reviewer`; BLOCKING findings → Coder |
+| 6d ADR | `check-adr trivial`, else `orch-adr-writer` and `check-adr adr`; never fails the run |
+| 7 Done | Result block, commit log, `run-usage.py`, memory.md run history, final summary |
+
+Retry caps are 2 per counter (`retry_count`, `architect_retries`, `verify_retries`,
+`render_retries`, `render_setup_retries`). A small run escalates to standard on its first
+trouble. Every cap, pause and stop names the `/resume-orchestration` command to continue with.
+The transitions are the `ph_*` / `res_*` / `ans_*` handlers in `.claude/scripts/orch.py`; their
+tests are in `.claude/scripts/tests/test_orch.py`.
+
+## Stage 7: gotchas
+
+When the final `stop` carries a `followup`, decide whether this run surfaced a gotcha worth
+remembering (a naming convention, a config quirk, a dependency trap: anything a future
+Architect/Coder/Tester would otherwise rediscover the hard way), and **where it belongs**:
+
+- **About the target codebase** (its libraries, test environment, conventions, commands): add it
+  to the best-matching file in `{REPO}/.claude/rules/` (create the folder, or a new topic file with
+  a `paths:` frontmatter scope, if needed), as a short actionable rule: symptom → cause → what to
+  do. Commit it on the run's branch as its own commit: `docs(rules): {one-line summary}` with body
+  `Run: {RUN_ID}`. It ships with the change and helps plain Claude sessions in that repo too.
+- **About the pipeline itself** (this orchestrator's scripts, stages, contract checks): append one
+  line to `memory.md` under `## Pipeline gotchas` (or the check-contract section):
+  `- [active] {gotcha}. (added: {RUN_ID})`.
+- **If it corrects an existing entry**, update or retire that entry instead of adding a
+  contradicting one next to it.
+
+Skip this if nothing new was learned; don't pad either file. If you made a `docs(rules)` commit,
+refresh the commit list in the final message with the `git log` command the `followup` gives.
+Then show the user the `stop` message.

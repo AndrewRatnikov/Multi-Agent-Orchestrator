@@ -7,7 +7,10 @@
  * so the render-reviewer gets before/after pairs. It judges nothing.
  *
  * Usage:
- *   node render-capture.mjs <repo_path> <run_id> [--config-from REF] [--only after|before]
+ *   node render-capture.mjs <repo_path> <run_id> [--config-from REF] [--only after|before] [--run-dir DIR]
+ *
+ *   --run-dir DIR  read state.md/contract.json from DIR and write render/ there instead of
+ *                  runs/{RUN_ID}/ (the render-setup smoke test uses runs/<id>/render-setup/smoke)
  *
  * What it reads:
  *   runs/{RUN_ID}/contract.json   render_targets (declared by the Architect)
@@ -61,12 +64,12 @@ const flag = (name) => {
 }
 const positional = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1].startsWith('--')))
 if (positional.length < 2) {
-  console.error('usage: render-capture.mjs <repo_path> <run_id> [--config-from REF] [--only after|before]')
+  console.error('usage: render-capture.mjs <repo_path> <run_id> [--config-from REF] [--only after|before] [--run-dir DIR]')
   process.exit(3)
 }
 const REPO = path.resolve(positional[0])
 const RUN_ID = positional[1]
-const RUN_DIR = path.join(ORCH_ROOT, 'runs', RUN_ID)
+const RUN_DIR = flag('--run-dir') ? path.resolve(ORCH_ROOT, flag('--run-dir')) : path.join(ORCH_ROOT, 'runs', RUN_ID)
 const OUT = path.join(RUN_DIR, 'render')
 const ONLY = flag('--only')
 

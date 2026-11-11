@@ -33,7 +33,7 @@ Read all of these before writing anything:
 6b. `{REPO}/docs/adr/README.md`, if present, and every ADR it lists that touches the area of this task. **An `Accepted` ADR is a decision the repo already made: follow it like a rule.** If this task needs to go against one, that is itself a decision: record it under `## Decisions` with the ADR in `Supersedes`, and say why in `Why`.
 7. The real source files the plan touches, and one or two similar existing files as a style reference
 8. If the task touches UI: the repo's render config, to learn which named states (fixtures) the render review can reach:
-   `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, the render review will be SKIPPED for this repo: still declare targets, they cost nothing.
+   `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, still declare targets: right after you, Stage 2b offers the user to set the config up, and its setup agent defines exactly the fixtures you name. Then name each fixture as a short slug for the data state (`no-budget`, `with-budget`), and make plan.md's `## Render targets` row say what data that state needs.
 
 ## Step 1: Ground yourself in the repo
 

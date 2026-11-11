@@ -21,6 +21,7 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 ---
 
 ## Pipeline gotchas
+- [active] After a session restart the shell may default to Node 18 (nvm) and Docker Desktop may be stopped: run-tests.sh fails with a pnpm engine error and verify.py ends INCOMPLETE (DB steps skipped). Prepend `$HOME/.nvm/versions/node/v26.13.0/bin` to PATH (repo .nvmrc = 26) and `open -a Docker` before the sandbox/verify. (added: run_20261110_073521)
 - [active] check-contract.py code-mode `exports` did not recognise `export type { X } from` re-exports (false MISSING_EXPORT); EXPORT_PATTERNS now accepts it. Also: `check-contract.py validate` fails with CREATE_FILE_EXISTS once the branch holds created files, so re-validate against the original branch only. (added: run_20261029_165724)
 - [active] repo-digest.sh echoes the whole TASK into the 'Similar existing files' heading; with a long multi-line task the digest balloons (~9k tokens). Trim that heading to one line before Stage 1. (added: run_20261022_204015)
 - [active] A Tester may leave plan MODIFY test files out of tests/ when they need no change; check-paths then fails with MISSING_FILE. Fix: cp the repo file verbatim into runs/{RUN_ID}/tests/ (no diff) instead of letting the Tester re-type it. (added: run_20261022_204015)
@@ -61,6 +62,11 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 
 - [active] Architect's contract.json `existing` testids can miss ids that exist on main (e.g. landing-page); the Tester then evades the checker. Fix by adding to `existing`, not by obfuscating selectors. (added: run_20261031_094926)
 - [active] Sync/PGlite tests with a frozen Date: later writes tie on updatedAt and lose under existing merge rules; tests must advance vi.setSystemTime between ordered writes. (added: run_20261031_094926)
+- [active] repo-digest.sh: for pnpm monorepos (no root test script) the Test command comes out UNKNOWN and the digest scans the repo's stale .claude/worktrees/ and embeds a multi-line task in 'Similar existing files'. Fix the digest by hand before the Architect (use .claude/rules/test-commands.md); never put prose lines in the '## Test command' section, run-tests.sh joins every non-fence line with ' && '. (added: run_20261102_194108)
+- [active] Sandbox FAIL that no implementation can fix (e.g. toBe(-Math.sign(0)) is -0 vs 0 under Object.is) is a Tester defect: route to Tester with FEEDBACK, then delta review, instead of the Coder. (added: run_20261102_194108)
+- [active] Machine sleep (laptop on battery/lid closed) kills subagents mid-response with an API error; caffeinate -i does not stop it. Run on AC with the lid open; if a Tester dies, split its remaining files into 2-3 small passes (finished files persist in runs/{RUN_ID}/tests/). (added: run_20261102_220909)
+- [active] verify.py can mislabel a web build failure as new when main fails earlier (Google Fonts fetch) and the branch reaches a later error (e.g. Next SecurityFatalError advisory on an unchanged next version). Check package.json diff before routing to the Coder. (added: run_20261102_220909)
+- [active] Never run `npm ci` in {REPO} to sync node_modules without checking it will succeed: npm deletes node_modules first, and a Safe-chain minimum-age refusal then leaves it empty. `npm ci --dry-run` does not reveal the block; test the install in a scratch copy first. (added: run_20261108_170904)
 
 ## check-contract.sh known false positives
 
@@ -180,3 +186,25 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 - run_20261030_212632 | 2026-10-31 | task: Family sharing flows (key bundle, Family sync stream, create/invite/join/approve/rotate/remove, Settings → Family, /join; run C) | result: PASS | size: standard | tokens: 93634078 (weighted 16125059)
 - run_20261031_094926 | 2026-10-31 | task: Family UX run D (switcher, paid-by, member analytics, moveRecords, go-live checklist) | result: PASS | size: standard | tokens: 93603414 (weighted 16239300)
 - run_20261101_145216 | 2026-11-01 | task: Settings grouped list/sidebar + shared chart colour tokens | result: PASS | size: standard | tokens: 26003525 (weighted 5082327)
+- run_20261102_194108 | 2026-11-02 | task: coin grades Phase 1 of 4 (data/API/docs) | result: PASS | size: standard | tokens: 23935764 (weighted 5884176)
+- run_20261102_220909 | 2026-11-03 | task: coin grades Phase 2 of 4 (UI) | result: PASS (web build accepted unverified) | size: standard | tokens: 32881372 (weighted 9476694)
+- run_20261103_192441 | 2026-11-03 | task: coin grades Phase 3 of 4 (min grade + upgrades) | result: PASS (web build pre-existing on main; render SKIPPED; 2 contract fix-ups: pre-existing testids) | size: standard | tokens: 24262974 (weighted 5724576)
+- run_20261104_064643 | 2026-11-04 | task: coin grades Phase 4 of 4 (CSV import reads grades) | result: PASS (web build pre-existing on main; render SKIPPED; confirm contract change supersedes clauses of 2 ADRs) | size: standard | tokens: 30271374 (weighted 6063854)
+- run_20261106_071345 | 2026-11-06 | task: dep upgrade Phase 1/7 (next 16.4.3 security bump) | result: PASS (DB verify steps accepted unverified; merged PR #57) | size: standard | tokens: 7336882 (weighted 1724530)
+- run_20261106_223354 | 2026-11-06 | task: dep upgrade Phase 2/7 (Node 26 pinned) | result: PASS (DB verify steps deferred to Phase 3; merged PR #58) | size: standard | tokens: 14994180 | weighted: 3080923
+- run_20261107_151225 | 2026-11-07 | task: dep upgrade Phase 3/7 (in-major updates, multer+deepmerge-ts overrides) | result: PASS (full verify incl. DB/e2e; render SKIPPED) | size: standard | tokens: 20256073 | weighted: 4260519
+- run_20261107_163405 | 2026-11-07 | task: dep upgrade Phase 4/7 (vitest 5, jest 30, plugin-react 6, jsdom 30) | result: PASS (full verify incl. DB/e2e; render SKIPPED; 1 NEEDS_INPUT answered with defaults) | size: standard | tokens: 24756247 | weighted: 4483756
+- run_20261107_174316 | 2026-11-07 | task: dep upgrade Phase 5/7 (TypeScript 6.0.3 aligned) | result: PASS (full verify incl. DB/e2e; render SKIPPED) | size: standard | tokens: 30836515 | weighted: 5194059
+- run_20261107_181139 | 2026-11-07 | task: dep upgrade Phase 6/7 (NestJS 12; multer override removed; jest scripts need --experimental-vm-modules) | result: PASS (full verify incl. DB/e2e; render SKIPPED) | size: standard | tokens: 45576155 | weighted: 8321380
+- run_20261108_081744 | 2026-11-08 | task: Phase 7 of 7 Prisma 6 to 7 upgrade (Coin Collector Companion) | result: PASS (one accepted Verify failure: main's verify.json drift step uses --from-url, removed in Prisma 7) | size: standard | tokens: 69247949 (weighted 13157475)
+- run_20261108_170904 | 2026-11-08 | task: Coordinates and Place ID input for route locations (n8n Google Maps node) | result: PASS | size: standard | tokens: 9873820 (weighted 3075590)
+
+- run_20261108_173105 | 2026-11-08 | task: Phase 1/2 canonical checklist gaps API (GET /sets/canonical/:id/gaps) | result: PASS (full verify incl. e2e; render SKIPPED) | size: standard | tokens: 7614652 (weighted 1932179)
+- run_20261109_220451 | 2026-11-09 | task: Phase 2/2 web progress on canonical/public set pages | result: PASS (full verify incl. DB/e2e after Docker started; render SKIPPED) | size: standard | tokens: 18473451 (weighted 3999705)
+- run_20261110_062926 | 2026-11-10 | task: Phase 1/4 refactor — split i18n en/es by area | result: PASS | size: standard | tokens: 8675311 (weighted 2241895)
+- run_20261110_073521 | 2026-11-10 | task: Phase 2/4 refactor — split set page into set-page components | result: PASS | size: standard | tokens: 22287339 (weighted 4677377)
+- run_20261110_214902 | 2026-11-10 | task: refactor phase 3/4 split add-coins-sheet.tsx | result: PASS | size: standard | tokens: 12115004 (weighted 2726738)
+- run_20261110_223025 | 2026-11-11 | task: refactor phase 4/4 split sets/new/page.tsx | result: PASS | size: standard | tokens: 18930045 (weighted 5257644; includes this long orchestrator session, subagents alone ≈ 1.6M weighted)
+- run_20261111_062918 | 2026-11-11 | task: Collection Export CSV phase 1 | result: PASS | size: standard | tokens: 8936368 (weighted 2276459)
+- [active] Architect must not write the verify-fence marker inline in prose (plan.md table row): verify.py takes it as the block start and runs prose as commands. (added: run_20261111_062918)
+- run_20261111_204530 | 2026-11-11 | task: Collection Export CSV phase 2 | result: PASS | size: standard | tokens: 12159607 (weighted 2450548)

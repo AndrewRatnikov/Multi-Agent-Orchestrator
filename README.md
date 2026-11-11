@@ -8,11 +8,13 @@ A spec-driven, test-first multi-agent pipeline for Claude Code. Hand it an idea 
 /run-orchestration "add a Budget Summary card component"
 ```
 
-The pipeline runs sequentially, with a review gate after each stage. Each LLM stage is its own subagent (`.claude/agents/orch-*.md`) with a fresh context, its own model and tool limits, and a hook that only lets it write into its own artifact folder. The main session only orchestrates: it owns state, retries, gates and git.
+The pipeline runs sequentially, with a review gate after each stage. Each LLM stage is its own subagent (`.claude/agents/orch-*.md`) with a fresh context, its own model and tool limits, and a hook that only lets it write into its own artifact folder. The control flow is a deterministic driver, `.claude/scripts/orch.py`: it runs every mechanical step, owns state (`runs/<id>/state.json`, rendered to `state.md`), retry counters, escalation, routing and git, and tells the main session one thing at a time (spawn this agent, ask this question, stop). The main session only loops: `orch.py next`, do it, `orch.py result`. Tests: `python3 -m pytest .claude/scripts/tests -q`.
 
 ```
 Product agent    → prd.md
 Architect agent  → plan.md + Interface Contract
+Render config    → if the run changes pages and the repo has no render config: ask, and
+                   optionally set it up on its own branch (orch-render-setup + smoke test)
 Tester agent     → test files (written before any code)
 Test-Reviewer    → gate: are the tests any good?
 Coder agent      → implementation files
@@ -43,6 +45,20 @@ NOTEs only go into the report. How to get past sign-in is per-repo: a `render` s
 the target's `.claude/verify.json` plus a hook under `.claude/render/`, both read from the
 original branch. A repo without that config ends as **SKIPPED**, never PASS, and the final
 summary says so. `/resume-orchestration <id> --from render` re-runs just this stage.
+
+The pipeline doesn't wait until the end to find that out. Right after the Architect, Stage 2b
+(`render-config.py check`) looks for the config; if the run declares render targets and the repo
+has none, it asks: **set it up now**, **skip this time**, or **don't ask again for this repo**
+(kept in `repo-notes/render-optout.json`, orchestrator side). If an unmerged branch already has a
+config, it offers that branch instead. Setting it up runs `orch-render-setup`, which writes the
+`render` section, `launch.json` and the sign-in/seed hook into the run folder (defining every
+fixture the Architect named); `render-config.py apply` validates them and commits them on a
+**separate** branch, `chore/render-config`, cut from the original branch in a throwaway worktree;
+and a smoke test (`render-capture.mjs --run-dir … --only after`) must reach a signed-in page with
+it, with up to 2 fix rounds. On success the run reads its render config from that branch
+(`render_config_ref`) and the handoff checklist says to merge it as its own PR. Setup never fails
+a run: if it can't work, the run carries on and the render review is SKIPPED. To set a repo up
+ahead of time, without a run: `/setup-render --repo ~/Projects/coin-collector-companion`.
 
 Small tasks don't pay for the full ceremony. Right after the Architect, `size-run.py` sizes the
 run from `contract.json`: at most 3 code files, no new package, no sensitive path (schema,
@@ -117,10 +133,11 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 
 ```
 .claude/
-  agents/          # orch-product, orch-architect, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
-  commands/        # /run-orchestration, /resume-orchestration
+  agents/          # orch-product, orch-architect, orch-render-setup, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
+  commands/        # /run-orchestration, /resume-orchestration, /verify-branch, /setup-render
   render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
-  scripts/         # repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, sandbox-timeout.py, verify.py, render-capture.mjs, run-usage.py, seed-code.py, coder-slices.py, commit-code.py, regen.py, review-delta.py, guard-writes.sh
+  procedures/      # render-setup.md (used by /setup-render)
+  scripts/         # orch.py (the pipeline driver; tests in scripts/tests/), repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, sandbox-timeout.py, verify.py, render-capture.mjs, render-config.py, run-usage.py, seed-code.py, coder-slices.py, commit-code.py, regen.py, review-delta.py, guard-writes.sh
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet
