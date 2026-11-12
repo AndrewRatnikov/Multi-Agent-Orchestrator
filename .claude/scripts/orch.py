@@ -688,6 +688,8 @@ def ph_render_setup(r):
     r.set(step="render-setup", status="running")
     code, out = r.call("render-config.py", "check", r.id, r.repo)
     r.report("[render-config] {}".format(out.strip()))
+    if code == 2 and out.strip().startswith("no-targets:"):
+        r.say("Render review will be **SKIPPED**: " + out.strip()[len("no-targets:"):].strip())
     if code in (0, 2, 3, 4):
         return to_tester_stage(r)
     if r.st.get("unattended"):
@@ -714,11 +716,24 @@ def ph_render_setup(r):
                  [RS_SETUP, RS_SKIP, RS_OPTOUT], pause="awaiting_render_decision")
 
 
-def render_targets(r):
+def contract_json(r):
     try:
         c = json.loads(read(r.path("contract.json")) or "{}")
     except ValueError:
-        return []
+        return {}
+    return c if isinstance(c, dict) else {}
+
+
+def render_none_reason(r):
+    """The Architect's reason for declaring no render targets ('' when there are targets or no reason)."""
+    c = contract_json(r)
+    if c.get("render_targets"):
+        return ""
+    return (c.get("render_targets_none_reason") or c.get("render_skip_reason") or "").strip()
+
+
+def render_targets(r):
+    c = contract_json(r)
     out = []
     for t in c.get("render_targets") or []:
         out.append("{} {} ({})".format(t.get("id", "?"), t.get("route", "?"), t.get("state", "default")))
@@ -1554,8 +1569,10 @@ def ph_done(r):
     rc_line = ("from render_config_ref {} (not merged yet)".format(ref) if ref and not merged(repo, ref, orig)
                else "from render_config_ref {}".format(ref) if ref
                else "from {}".format(orig) if render.startswith(("PASS", "ACCEPTED")) else "none")
-    r.report("---\n## Result: PASS ✓\n\nAll tests passed. Pipeline complete.\nRender review: {}\n"
-             "Render config: {}\nFinished: {}".format(render, rc_line, now_iso()))
+    none_reason = render_none_reason(r)
+    r.report("---\n## Result: PASS ✓\n\nAll tests passed. Pipeline complete.\nRender review: {}\n{}"
+             "Render config: {}\nFinished: {}".format(
+                 render, "Render targets: none ({})\n".format(none_reason) if none_reason else "", rc_line, now_iso()))
     _, log = git(repo, "log", "--oneline", "{}..{}".format(orig, br))
     _, count = git(repo, "rev-list", "--count", "{}..{}".format(orig, br))
     r.report("\n### Commits on {} ({} ahead of {})\n{}".format(br, count, orig, log))
@@ -1606,8 +1623,11 @@ def render_line(r, render):
         return "`PASS` (notes: {}), see `runs/{}/render-review.md`".format(len(r.ctx.get("render_notes", [])), r.id)
     if render.startswith("SKIPPED"):
         why = ""
+        none_reason = render_none_reason(r)
+        if none_reason and none_reason not in render:
+            why += " Architect declared no render targets: {}.".format(none_reason)
         if r.ctx.get("rs_failed"):
-            why = " Render setup failed: {}.".format(r.ctx["rs_failed"])
+            why += " Render setup failed: {}.".format(r.ctx["rs_failed"])
         return "`{}`. The pages were **not** looked at; this is not a pass.{}".format(render, why)
     return "`{}`. The gap remains.".format(render)
 

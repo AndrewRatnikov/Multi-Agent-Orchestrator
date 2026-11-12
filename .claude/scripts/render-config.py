@@ -14,7 +14,11 @@ Usage:
   render-config.py check <run_id> <repo>
       Is render config needed and present for this run?
       exit 0  configured: <ref>          the config ref (render_config_ref or original_branch) has it
-      exit 2  not-needed: <why>          contract.json declares no render_targets
+      exit 2  not-needed: <why>          no render_targets, and the run changes no UI files (API-only)
+      exit 2  no-targets: <reason>       UI files change, no render_targets: the Architect's
+                                         render_targets_none_reason (or, for an old contract, its
+                                         render_skip_reason / "no reason given"). check-contract
+                                         validate already rejects the no-reason case for new runs.
       exit 4  opted-out: <since/why>     the user said "don't ask again" for this repo
       exit 5  pending: <branch> ...      no config on the base, but unmerged local branch(es) have one
       exit 1  missing: <why>             no config anywhere: ask the user
@@ -56,6 +60,9 @@ import tempfile
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from ui_files import short_list, ui_files  # noqa: E402
+
 ORCH_ROOT = os.path.dirname(os.path.dirname(HERE))
 OPTOUT_FILE = os.path.join(ORCH_ROOT, "repo-notes", "render-optout.json")
 
@@ -156,8 +163,17 @@ def cmd_check(run_id, repo):
     contract = json.load(open(contract_path, encoding="utf-8")) if os.path.exists(contract_path) else {}
     targets = contract.get("render_targets") or []
     if not targets:
-        why = (contract.get("render_skip_reason") or "").strip()
-        print("not-needed: contract.json declares no render_targets" + (" ({})".format(why) if why else ""))
+        ui, _ = ui_files(contract, repo, run_dir)
+        if not ui:
+            print("not-needed: contract.json declares no render_targets and the run changes no UI files")
+            return 2
+        none_reason = (contract.get("render_targets_none_reason") or "").strip()
+        legacy = (contract.get("render_skip_reason") or "").strip()
+        why = ("render_targets_none_reason: " + none_reason if none_reason
+               else "render_skip_reason (old contract): " + legacy if legacy
+               else "no reason given (old contract)")
+        print("no-targets: the run changes UI files ({}) but the Architect declared no render targets; "
+              "the render review will be SKIPPED. {}".format(short_list(ui), why))
         return 2
     original = state.get("original_branch") or "main"
     ref = state.get("render_config_ref") or original

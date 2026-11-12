@@ -299,6 +299,31 @@ def test_happy_path_standard_run(env):
     assert "followup" in inst
 
 
+def test_ui_run_without_targets_says_skipped_and_why(env):
+    """An Architect opt-out (render_targets_none_reason) is shown at 2b and in report.md and the
+    final summary, next to SKIPPED, never as a pass."""
+    reason = "pure refactor: the page's markup is unchanged"
+
+    def architect(inst):
+        out = env.agents.architect(inst)
+        p = os.path.join(env.agents.run_dir(inst), "contract.json")
+        open(p, "w").write(json.dumps({"render_targets": [], "render_targets_none_reason": reason}))
+        return out
+    env.responders["architect"] = architect
+    env.fake.on("render-config.py:check", (2, "no-targets: the run changes UI files (page.tsx) but the Architect "
+                                              "declared no render targets; the render review will be SKIPPED. "
+                                              "render_targets_none_reason: " + reason))
+    env.fake.on("render-capture.mjs", _render(str(env.root), 2, "Architect declared no render targets: " + reason))
+    says = []
+    inst = env.drive(env.start(), until=lambda i: says.extend(i.get("say") or []))
+    assert inst["action"] == "stop" and inst["status"] == "done", inst
+    assert any(s.startswith("Render review will be **SKIPPED**") and reason in s for s in says)
+    rep = env.report()
+    assert "[render-config] no-targets:" in rep and "Render targets: none ({})".format(reason) in rep
+    line = next(l for l in inst["message"].splitlines() if l.startswith("**Render review:**"))
+    assert "SKIPPED" in line and reason in line and "not a pass" in line
+
+
 def test_start_refuses_dirty_tree(env):
     (env.repo / "x.txt").write_text("dirty")
     inst = env.cmd("start", "--repo", env.repo, "--task", "t")

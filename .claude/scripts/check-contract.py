@@ -34,15 +34,22 @@ contract.json (written by the Architect):
     "removed":   ["language-switcher-en"]      # removed by this run; tests may assert absence
   },
   "packages": {"added": ["cookie-parser"]},    # new dependencies this run adds to a package.json
-  "render_targets": [                          # optional; pages the render review will open
-    {"id": "dashboard-no-budget", "route": "/", "state": "no-budget",
+  "render_targets": [                          # pages the render review will open; required when
+    {"id": "dashboard-no-budget", "route": "/", "state": "no-budget",   # the run changes UI files
      "fixture": "no-budget", "ready": "dashboard-summary", "look_for": "income shown once"}
   ],
-  "render_skip_reason": "",                    # alternative to render_targets for a UI change with nothing to render
+  "render_targets_none_reason": "",            # explicit opt-out: UI files change but nothing visible does
   "commits": [                                 # the Coder's work as logical commits, in build order
     {"message": "feat(sets): missing-coins CSV builder", "files": ["apps/web/src/lib/x.ts"]}
   ]
 }
+
+Render targets (checked by validate): when the coder-owned files include UI files (ui_files.py:
+.tsx/.jsx/.vue/.svelte and stylesheets outside test files, or the repo's `ui_paths` in the
+`render`/`sizing` section of its .claude/verify.json on original_branch), `render_targets` must
+not be empty unless `render_targets_none_reason` says why nothing visible changes. The older
+`render_skip_reason` no longer counts as an opt-out (it was used for "the repo has no render
+config", which Stage 2b handles); it is still accepted by the schema so old contracts load.
 
 `commits` (checked by validate): every coder-owned file in exactly one commit, no test files
 (Stage 3 commits the tests first), messages "type(scope): summary" up to 72 characters.
@@ -53,6 +60,9 @@ import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ui_files import short_list, ui_files  # noqa: E402
 
 BUILTINS = set("""assert assert/strict async_hooks buffer child_process cluster console constants crypto
 dgram diagnostics_channel dns dns/promises domain events fs fs/promises http http2 https inspector
@@ -405,8 +415,9 @@ def render_schema_errors(data):
         rt = []
     if not isinstance(rt, list):
         return ["SCHEMA: `render_targets` must be a list"]
-    if not isinstance(data.get("render_skip_reason", ""), str):
-        errs.append("SCHEMA: `render_skip_reason` must be a string")
+    for key in ("render_targets_none_reason", "render_skip_reason"):
+        if not isinstance(data.get(key, ""), str):
+            errs.append("SCHEMA: `{}` must be a string".format(key))
     ids, pairs = set(), set()
     for i, t in enumerate(rt):
         if not isinstance(t, dict):
@@ -432,19 +443,6 @@ def render_schema_errors(data):
         if isinstance(t.get("ready"), str) and not re.match(r"^[\w\-:.]+$", t["ready"]):
             errs.append("SCHEMA: render_targets[{}].ready must be a plain testid: {}".format(i, t["ready"]))
     return errs
-
-
-UI_EXTS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".html")
-
-
-def touches_ui(c):
-    """Coder-owned, non-test UI files this run creates or modifies."""
-    out = []
-    for f in c.files:
-        p = f.get("path", "")
-        if f.get("owner") == "coder" and p.endswith(UI_EXTS) and not re.search(r"\.(test|spec)\.", p):
-            out.append(p)
-    return out
 
 
 def repo_render_fixtures(repo_path, run_dir):
@@ -474,14 +472,19 @@ def repo_render_fixtures(repo_path, run_dir):
 def check_render(c, repo, run_dir, plan_path):
     v = []
     targets = c.data.get("render_targets") or []
-    skip = (c.data.get("render_skip_reason") or "").strip()
-    ui = touches_ui(c)
-    if ui and not targets and not skip:
-        v.append("RENDER_TARGETS_MISSING: this run changes UI files ({}) but contract.json has no render_targets and no "
-                 "render_skip_reason. Declare each route and state the change affects (e.g. / in no-budget and with-budget), "
-                 "or give a render_skip_reason.".format(", ".join(ui[:4]) + (", ..." if len(ui) > 4 else "")))
-    if targets and skip:
-        v.append("RENDER_TARGETS_AND_SKIP: render_skip_reason is set but render_targets is not empty; use one or the other")
+    none_reason = (c.data.get("render_targets_none_reason") or "").strip()
+    legacy = (c.data.get("render_skip_reason") or "").strip()
+    ui, _ = ui_files(c.data, repo.path, run_dir)
+    if ui and not targets and not none_reason:
+        v.append("RENDER_TARGETS_MISSING: this run changes UI files ({}) but contract.json has no render_targets. Declare "
+                 "a target for every page the change affects, one per named state (e.g. / in no-budget and with-budget). "
+                 "A repo without render config is not a reason to skip: Stage 2b offers to set it up from your targets. "
+                 "Only if nothing visible changes (e.g. a pure refactor) set render_targets_none_reason instead.{}".format(
+                     short_list(ui),
+                     " (render_skip_reason no longer counts as an opt-out: {!r})".format(legacy) if legacy else ""))
+    if targets and none_reason:
+        v.append("RENDER_TARGETS_AND_NONE_REASON: render_targets_none_reason is set but render_targets is not empty; "
+                 "use one or the other")
     known = c.allowed_testids() - c.test_only - c.removed
     fixtures = repo_render_fixtures(repo.path, run_dir) if targets else None
     for t in targets:

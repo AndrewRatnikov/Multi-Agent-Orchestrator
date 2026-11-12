@@ -33,7 +33,7 @@ Read all of these before writing anything:
 6b. `{REPO}/docs/adr/README.md`, if present, and every ADR it lists that touches the area of this task. **An `Accepted` ADR is a decision the repo already made: follow it like a rule.** If this task needs to go against one, that is itself a decision: record it under `## Decisions` with the ADR in `Supersedes`, and say why in `Why`.
 7. The real source files the plan touches, and one or two similar existing files as a style reference
 8. If the task touches UI: the repo's render config, to learn which named states (fixtures) the render review can reach:
-   `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, still declare targets: right after you, Stage 2b offers the user to set the config up, and its setup agent defines exactly the fixtures you name. Then name each fixture as a short slug for the data state (`no-budget`, `with-budget`), and make plan.md's `## Render targets` row say what data that state needs.
+   `git -C {REPO} show {original_branch}:.claude/verify.json` (the `render.fixtures` keys and their descriptions; `original_branch` is in `runs/{RUN_ID}/state.md`, or `render_config_ref` if that field is set). If there is no `render` section, **still declare targets**: right after you, Stage 2b offers the user to set the config up, and its setup agent defines exactly the fixtures you name. A missing render config is never a reason to declare none. Then name each fixture as a short slug for the data state (`no-budget`, `with-budget`), and make plan.md's `## Render targets` row say what data that state needs.
 
 ## Step 1: Ground yourself in the repo
 
@@ -107,7 +107,8 @@ The single source of truth for all names. The Tester and Coder read this; neithe
 
 ## Render targets
 
-(Only when the task touches UI; otherwise omit this section. After Verify, the pipeline opens each
+(When any coder-owned file is a UI file; otherwise omit this section. If nothing visible changes and
+contract.json has `render_targets_none_reason`, write that reason here instead of a table. After Verify, the pipeline opens each
 route below in a real browser, in the named state, at desktop and mobile width, on this branch and
 on the original branch, and a reviewer compares the screenshots with the PRD.)
 
@@ -219,12 +220,36 @@ Rules:
 - **testids.test_only**: ids that exist only inside test fixtures (e.g. a fake component in a
   `vi.mock` factory). **removed**: ids this run deletes, which tests may assert are gone.
 - **packages.added**: dependencies this run adds (and then the package.json is in `files`).
-- **render_targets** (any task that creates or modifies a `.tsx` / `.jsx` / `.vue` / `.svelte` / `.css` / `.html` file; the validator rejects such a contract without them): the pages and states the change **affects**, not just the page it is mainly about. A component that is used by several pages needs a target per page that shows it. A page that renders differently depending on data needs **one target per state** (for the dashboard: no budget set, budget set, and so on). It's states like these that unit tests of the parts never see together.
+- **render_targets**: required whenever a coder-owned file is a UI file. By default that is any
+  `.tsx` / `.jsx` / `.vue` / `.svelte` file or stylesheet (`.css`, `.scss`, `.sass`, `.less`, ...)
+  that isn't a test file; a repo can replace that list with `ui_paths` in the `render` or `sizing`
+  section of its `.claude/verify.json`. `check-contract.py validate` rejects such a contract with
+  `RENDER_TARGETS_MISSING` when `render_targets` is empty and there's no
+  `render_targets_none_reason`. **Why:** a run that changes a page and skips the render review is
+  reported as SKIPPED, and nobody has looked at the composed page. That has happened in most runs so far.
+  Declare the pages and states the change **affects**, not just the page it is mainly about:
+  - **Every changed page gets a target.** A component used by several pages needs a target per page
+    that shows it. A changed stylesheet needs a target for each page it visibly styles.
+  - **Every named state of that page gets its own target.** A page that renders differently
+    depending on data needs one target per state the change shows up in (for the dashboard: no
+    budget set, budget set, over budget; for a list page: loading if the change touches it,
+    empty, with items). Unit tests of the parts never see these states together.
   - `id`: unique lowercase slug. `route`: a path starting with `/` (query string allowed). `state`: slug naming the state.
   - `fixture`: the named state to put the app in, one of the repo's `render.fixtures` keys. If the state you need isn't one of them, pick the closest and say in `look_for` what differs; never invent a fixture name (the validator checks it against the repo).
   - `ready`: a testid that is on the page once it has rendered in that state (declare it in `testids`). It proves the capture reached the right page instead of a login or error screen.
   - `look_for`: one line telling the reviewer what matters in this state.
-  - If a UI file changes but there is truly nothing to open in a browser (a component no page renders yet), set `"render_skip_reason": "…"` instead, and say why.
+  - **Opt-out, rarely:** if UI files change but **nothing visible** does, leave `render_targets`
+    empty and set `"render_targets_none_reason": "…"`, one sentence on why nothing a user sees
+    changes. It is printed in report.md and in the final summary next to "render review SKIPPED",
+    so the user can judge it. It's acceptable for:
+    - a pure refactor (renames, extracting a hook or a component) with identical output;
+    - a type-only or test-support change in a `.tsx` file;
+    - a component that no page renders yet (say which later run wires it in).
+    It is **not** acceptable for: "the repo has no render config" (Stage 2b handles that; declare
+    the targets anyway), "covered by unit tests", "small change", a new button, new copy, or any
+    change to layout, styling, conditional rendering or states. When in doubt, declare targets.
+  - Never set both `render_targets` and `render_targets_none_reason`. The old `render_skip_reason`
+    field no longer counts as an opt-out.
   - plan.md's `## Render targets` table must list the same targets.
 
 - **commits**: how the Coder's work lands in the repo's history. Group the coder-owned files
@@ -254,7 +279,7 @@ python3 .claude/scripts/check-contract.py "{RUN_ID}" "{REPO}" validate
 - [ ] Every PRD acceptance criterion appears in the coverage table
 - [ ] `contract.json` lists the same files as the Files changed table, and every testid, export and new package the plan mentions; `check-contract.py … validate` is clean
 - [ ] `commits` groups every coder-owned file into logical, reviewable commits in build order, with `type(scope): summary` messages
-- [ ] If the task touches UI: `render_targets` has one target per route **and per data state** the change affects (every route that renders a changed component; every branch such as "no data" / "has data" / "over limit"), each with a real fixture and a declared `ready` testid, and plan.md's `## Render targets` matches
+- [ ] If any coder-owned file is a UI file: `render_targets` has one target per route **and per data state** the change affects (every route that renders a changed component; every branch such as "no data" / "has data" / "over limit"), each with a real fixture and a declared `ready` testid, and plan.md's `## Render targets` matches. Or, only when nothing visible changes, `render_targets_none_reason` says why
 - [ ] Path aliases match the workspace member's tsconfig
 - [ ] Any new dependency is justified and listed in Files changed (`package.json` MODIFY)
 - [ ] The Test command in `repo-digest.md` is real and includes the setup steps from the target repo's rules

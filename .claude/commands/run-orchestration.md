@@ -76,8 +76,8 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 |---|---|
 | 0 Setup | clean-tree check, branch, run folder, `state`, `report.md`, repo digest |
 | 1 Product | `orch-product` → prd.md; `NEEDS_INPUT` pauses with an `ask` |
-| 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate`, `check-adr plan` (2 retries); `size-run.py` |
-| 2b Render config | `render-config.py check`; may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |
+| 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate` (UI files need `render_targets` or a `render_targets_none_reason`), `check-adr plan` (2 retries); `size-run.py` |
+| 2b Render config | `render-config.py check` (`no-targets:` = UI run the Architect opted out of, reason shown); may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |
 | 3 Tester | `orch-tester`; scope check, `check-paths tests`, autofix, `test:` / `fix tests:` commit |
 | 4 Gate + review | `check-contract tests` (4a), then `orch-test-reviewer` with `review-delta` (4b; skipped on small runs) |
 | 5 Coder | `seed-code`, `coder-slices` on the first pass, `orch-coder`; scope and path checks; `commit-code` |
@@ -86,7 +86,7 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 | 6b Verify | `verify.py`; failures go to whoever owns the file (tests → Tester, the rest → Coder) |
 | 6c Render | `render-capture.mjs`, then `orch-render-reviewer`; BLOCKING findings → Coder |
 | 6d ADR | `check-adr trivial`, else `orch-adr-writer` and `check-adr adr`; never fails the run |
-| 7 Done | Result block, commit log, `run-usage.py`, memory.md run history, final summary |
+| 7 Done | Result block, commit log, `run-usage.py`, memory.md run history, final summary (one render line: PASS, or SKIPPED and why) |
 
 Retry caps are 2 per counter (`retry_count`, `architect_retries`, `verify_retries`,
 `render_retries`, `render_setup_retries`). A small run escalates to standard on its first

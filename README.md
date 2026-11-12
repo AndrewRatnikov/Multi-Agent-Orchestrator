@@ -44,7 +44,19 @@ BLOCKING findings (e.g. the same figures shown twice) go back to the Coder, capp
 NOTEs only go into the report. How to get past sign-in is per-repo: a `render` section in
 the target's `.claude/verify.json` plus a hook under `.claude/render/`, both read from the
 original branch. A repo without that config ends as **SKIPPED**, never PASS, and the final
-summary says so. `/resume-orchestration <id> --from render` re-runs just this stage.
+summary says so in one line, with the reason. `/resume-orchestration <id> --from render` re-runs
+just this stage.
+
+A run that changes UI can't skip the review by declaring nothing. If any coder-owned file in
+`contract.json` is a UI file (by default `.tsx`, `.jsx`, `.vue`, `.svelte` and stylesheets, test
+files excluded; a repo can replace the list with `ui_paths` in the `render` or `sizing` section of
+its `.claude/verify.json`, read from the original branch), `check-contract.py validate` rejects an
+empty `render_targets` with `RENDER_TARGETS_MISSING`, and the Architect retries. Every changed page
+needs a target, one per named state. The only way out is an explicit
+`render_targets_none_reason` for a change with nothing visible (e.g. a pure refactor). It goes
+into `report.md` and the final summary next to "SKIPPED", so it can't pass for a review. A missing
+render config is not such a reason: the targets are what Stage 2b sets the config up for. Runs
+that change no UI file (API-only) need no targets, as before.
 
 The pipeline doesn't wait until the end to find that out. Right after the Architect, Stage 2b
 (`render-config.py check`) looks for the config; if the run declares render targets and the repo

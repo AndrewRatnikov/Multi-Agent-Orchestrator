@@ -422,15 +422,18 @@ async function main() {
   const contract = fs.existsSync(contractPath) ? JSON.parse(fs.readFileSync(contractPath, 'utf8')) : {}
   const targets = Array.isArray(contract.render_targets) ? contract.render_targets : []
 
+  // No targets is checked first, so the SKIPPED reason is the Architect's, not "no config".
+  if (!targets.length) {
+    const why = contract.render_targets_none_reason || contract.render_skip_reason
+    throw new Skip(why ? `Architect declared no render targets: ${why}` : 'contract.json declares no render_targets')
+  }
+
   // config from REF
   const rawVerify = gitShow(configRef, '.claude/verify.json')
   const verifyCfg = rawVerify ? JSON.parse(rawVerify) : {}
   const renderCfg = verifyCfg.render
   if (!renderCfg) {
     throw new Skip(`${configRef}:.claude/verify.json has no "render" section: this repo has not configured render review`)
-  }
-  if (!targets.length) {
-    throw new Skip(contract.render_skip_reason ? `Architect declared no render targets: ${contract.render_skip_reason}` : 'contract.json declares no render_targets')
   }
 
   const rawLaunch = gitShow(configRef, '.claude/launch.json')
