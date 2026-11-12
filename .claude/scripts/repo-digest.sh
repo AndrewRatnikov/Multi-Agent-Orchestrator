@@ -25,6 +25,91 @@ cd "$REPO_PATH"
 
 echo "repo-digest: generating for run $RUN_ID..."
 
+# Directories that are never part of the repo's own source, pruned at ANY depth:
+# node_modules (every workspace member has one) and .claude/worktrees (stale
+# full copies of the repo left by Claude Code worktree sessions).
+PRUNE_ANY=( -name node_modules -o -name .git -o -path '*/.claude/worktrees' )
+
+# list_files <find tests...>: repo files matching the tests, minus noise, sorted, no ./ prefix
+list_files() {
+  find . \( "${PRUNE_ANY[@]}" -o -path ./runs -o -path ./.next -o -path ./dist \) -prune \
+    -o -type f \( "$@" \) -print \
+    | sort | sed 's|^\./||'
+}
+
+# fenced <text>: print text inside a ``` block, nothing if empty
+fenced() {
+  echo '```'
+  [ -n "$1" ] && printf '%s\n' "$1"
+  echo '```'
+  echo ""
+}
+
+# resolve_test_cmd: prints "<source>\t<command>" for a package.json repo.
+# 1. a test script in the root package.json
+# 2. {REPO}/.claude/rules/test-commands.md (bash/sh fences; every command line, deduped)
+# 3. workspace members that have a test script
+# Only when all three fail: UNKNOWN.
+resolve_test_cmd() {
+  node -e '
+    const fs = require("fs"), path = require("path");
+    const readJSON = f => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+    const testKey = s => { const k = Object.keys(s || {});
+      return k.find(x => x === "test") || k.find(x => x === "test:unit") || k.find(x => x.includes("test")); };
+    const done = (src, cmd) => { console.log(src + "\t" + cmd); process.exit(0); };
+    const pkg = readJSON("package.json") || {};
+
+    const rootKey = testKey(pkg.scripts);
+    if (rootKey) done("root package.json", "npm run " + rootKey);
+
+    const rules = ".claude/rules/test-commands.md";
+    if (fs.existsSync(rules)) {
+      const cmds = []; let inFence = false, take = false;
+      for (const line of fs.readFileSync(rules, "utf8").split("\n")) {
+        const m = line.match(/^\s*(```|~~~)\s*([\w-]*)\s*$/);
+        if (m) { if (inFence) { inFence = false; take = false; } else { inFence = true; take = /^(bash|sh|shell|zsh|console)$/i.test(m[2]); } continue; }
+        if (!take) continue;
+        const c = line.trim().replace(/^\$\s+/, "");
+        if (c && !c.startsWith("#") && !cmds.includes(c)) cmds.push(c);
+      }
+      if (cmds.length) done(rules, cmds.join(" && "));
+    }
+
+    let globs = [], pm = "npm";
+    if (fs.existsSync("pnpm-workspace.yaml")) {
+      pm = "pnpm"; let inPk = false;
+      for (const line of fs.readFileSync("pnpm-workspace.yaml", "utf8").split("\n")) {
+        if (/^packages\s*:/.test(line)) { inPk = true; continue; }
+        if (inPk && /^\S/.test(line)) break;
+        const m = inPk && line.match(/^\s*-\s*["\x27]?([^"\x27#]+?)["\x27]?\s*(#.*)?$/);
+        if (m) globs.push(m[1]);
+      }
+    } else {
+      const w = pkg.workspaces; globs = Array.isArray(w) ? w : (w && w.packages) || [];
+      if (fs.existsSync("yarn.lock")) pm = "yarn";
+    }
+    const dirs = [];
+    for (const g of globs) {
+      if (g.startsWith("!")) continue;
+      const m = g.match(/^(.*?)\/\*\*?$/);
+      if (m) { try { for (const d of fs.readdirSync(m[1] || ".").sort()) dirs.push(path.join(m[1], d)); } catch {} }
+      else dirs.push(g.replace(/\/$/, ""));
+    }
+    const cmds = [];
+    for (const d of dirs) {
+      const p = readJSON(path.join(d, "package.json")); if (!p) continue;
+      const k = testKey(p.scripts); if (!k) continue;
+      const name = p.name || d, run = k === "test" ? "test" : "run " + k;
+      cmds.push(pm === "pnpm" ? `pnpm --filter ${name} ${run}`
+              : pm === "yarn" ? `yarn workspace ${name} ${run}`
+              : `npm run ${k} --workspace=${d}`);
+    }
+    if (cmds.length) done("workspace members", cmds.join(" && "));
+    done("none found", "UNKNOWN");
+  ' 2>/dev/null || printf 'node failed\tUNKNOWN\n'
+}
+
+TEST_SRC=""
 {
   echo "# Repo Digest"
   echo "_Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ") | Run: ${RUN_ID}_"
@@ -34,14 +119,8 @@ echo "repo-digest: generating for run $RUN_ID..."
   echo "## Directory tree"
   echo '```'
   find . -maxdepth 3 \
-    -not -path './.git/*' \
-    -not -path './node_modules/*' \
-    -not -path './runs/*' \
-    -not -path './.next/*' \
-    -not -path './dist/*' \
-    -not -path './build/*' \
-    -not -path './coverage/*' \
-    -not -name '*.lock' \
+    \( "${PRUNE_ANY[@]}" -o -path ./runs -o -path ./.next -o -path ./dist -o -path ./build -o -path ./coverage \) -prune \
+    -o -not -name '*.lock' -print \
     | sort \
     | sed 's|^\./||' \
     | sed 's|[^/]*/|  |g'
@@ -65,110 +144,66 @@ echo "repo-digest: generating for run $RUN_ID..."
     echo ""
 
     # ── 3. Test command ────────────────────────────────────────────────────────
+    # run-tests.sh joins every non-fence line of this section with " && ", so
+    # the section holds the fenced command and nothing else (no notes, no source).
+    RESOLVED=$(resolve_test_cmd)
+    TEST_SRC="${RESOLVED%%$'\t'*}"
+    TEST_CMD="${RESOLVED#*$'\t'}"
     echo "## Test command"
-    TEST_CMD=$(node -e "
-      const p = require('./package.json');
-      const s = p.scripts || {};
-      // prefer 'test', then 'test:unit', then first key containing 'test'
-      const key = Object.keys(s).find(k => k === 'test')
-               || Object.keys(s).find(k => k === 'test:unit')
-               || Object.keys(s).find(k => k.includes('test'));
-      console.log(key ? \`npm run \${key}\` : 'UNKNOWN');
-    " 2>/dev/null || echo "UNKNOWN")
-    echo '```'
-    echo "$TEST_CMD"
-    echo '```'
-    echo ""
+    fenced "${TEST_CMD:-UNKNOWN}"
   elif [ -f "pyproject.toml" ]; then
     echo "## pyproject.toml"
     echo '```toml'
     cat pyproject.toml
     echo '```'
     echo ""
+    TEST_SRC="pyproject.toml"
     echo "## Test command"
-    echo '```'
-    echo "pytest"
-    echo '```'
-    echo ""
+    fenced "pytest"
   fi
 
   # ── 4. Existing component / source files ────────────────────────────────────
   echo "## Existing source files"
 
-  # TypeScript/React projects
-  if find . -name "*.tsx" -not -path './node_modules/*' | grep -q .; then
+  TSX=$(list_files -name '*.tsx')
+  if [ -n "$TSX" ]; then
     echo "### Components (.tsx)"
-    echo '```'
-    find . -name "*.tsx" \
-      -not -path './node_modules/*' \
-      -not -path './.next/*' \
-      -not -path './dist/*' \
-      | sort | sed 's|^\./||'
-    echo '```'
-    echo ""
+    fenced "$TSX"
   fi
 
-  if find . -name "*.ts" -not -path './node_modules/*' -not -name "*.d.ts" | grep -q .; then
+  TS=$(list_files -name '*.ts' -not -name '*.d.ts')
+  if [ -n "$TS" ]; then
     echo "### TypeScript files (.ts)"
-    echo '```'
-    find . -name "*.ts" \
-      -not -path './node_modules/*' \
-      -not -name "*.d.ts" \
-      -not -path './.next/*' \
-      -not -path './dist/*' \
-      | sort | sed 's|^\./||'
-    echo '```'
-    echo ""
+    fenced "$TS"
   fi
 
-  # Python projects
-  if find . -name "*.py" -not -path './node_modules/*' | grep -q .; then
+  PY=$(list_files -name '*.py')
+  if [ -n "$PY" ]; then
     echo "### Python files (.py)"
-    echo '```'
-    find . -name "*.py" \
-      -not -path './.git/*' \
-      -not -path './node_modules/*' \
-      | sort | sed 's|^\./||'
-    echo '```'
-    echo ""
+    fenced "$PY"
   fi
 
   # ── 5. Similar files (if task hint provided) ─────────────────────────────────
   if [ -n "$TASK_HINT" ]; then
-    echo "## Similar existing files (task hint: \"$TASK_HINT\")"
-    echo '```'
+    # The heading gets only the first non-blank line of the task, capped at 80
+    # chars: the full task can be pages long.
+    HINT_TITLE=$(printf '%s\n' "$TASK_HINT" | awk 'NF{print; exit}' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '"')
+    if [ "${#HINT_TITLE}" -gt 80 ]; then HINT_TITLE="${HINT_TITLE:0:77}..."; fi
+    echo "## Similar existing files (task hint: \"$HINT_TITLE\")"
     # Extract meaningful words from the hint and search for similar filenames
-    KEYWORDS=$(echo "$TASK_HINT" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z]{3,}' | head -5 | tr '\n' '|' | sed 's/|$//')
+    KEYWORDS=$(printf '%s\n' "$TASK_HINT" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z]{3,}' | head -5 | tr '\n' '|' | sed 's/|$//' || true)
+    SIMILAR=""
     if [ -n "$KEYWORDS" ]; then
-      find . \
-        -not -path './node_modules/*' \
-        -not -path './.git/*' \
-        -not -path './runs/*' \
-        -type f \
-        | grep -iE "$KEYWORDS" \
-        | sort \
-        | head -20 \
-        | sed 's|^\./||' \
-        || echo "(no similar files found)"
+      SIMILAR=$(list_files -name '*' | grep -iE "$KEYWORDS" | head -20 || true)
     fi
-    echo '```'
-    echo ""
+    fenced "${SIMILAR:-(no similar files found)}"
   fi
 
   # ── 6. Existing test files ───────────────────────────────────────────────────
   echo "## Existing test files"
-  echo '```'
-  find . \
-    -not -path './node_modules/*' \
-    -not -path './.git/*' \
-    -not -path './runs/*' \
-    -type f \
-    \( -name "*.test.ts" -o -name "*.test.tsx" -o -name "*.spec.ts" -o -name "*.spec.tsx" \
-       -o -name "*.test.js" -o -name "*.test.jsx" -o -name "*.spec.js" \
-       -o -name "test_*.py" -o -name "*_test.py" \) \
-    | sort | sed 's|^\./||'
-  echo '```'
-  echo ""
+  fenced "$(list_files -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \
+              -o -name '*.test.js' -o -name '*.test.jsx' -o -name '*.spec.js' \
+              -o -name 'test_*.py' -o -name '*_test.py')"
 
   # ── 7. tsconfig / jest config (conventions) ──────────────────────────────────
   if [ -f "tsconfig.json" ]; then
@@ -201,6 +236,7 @@ echo "repo-digest: generating for run $RUN_ID..."
 CHAR_COUNT=$(wc -c < "$OUTPUT")
 TOKEN_EST=$(( CHAR_COUNT / 4 ))
 echo "repo-digest: written to $OUTPUT (~${TOKEN_EST} tokens)"
+[ -n "$TEST_SRC" ] && echo "repo-digest: test command from $TEST_SRC"
 
 if [ "$TOKEN_EST" -gt 2000 ]; then
   echo "repo-digest: WARNING — digest is large (~${TOKEN_EST} tokens). Consider trimming devDependencies or file lists."
