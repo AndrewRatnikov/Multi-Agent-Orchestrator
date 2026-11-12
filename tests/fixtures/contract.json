@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "files": [
+    {"path": "apps/web/src/components/sets/set-progress.tsx", "action": "create", "owner": "coder"},
+    {"path": "apps/web/src/components/sets/index.ts", "action": "create", "owner": "coder"},
+    {"path": "apps/web/src/components/layout/site-nav.tsx", "action": "modify", "owner": "coder"},
+    {"path": "apps/web/src/components/sets/set-progress.test.tsx", "action": "create", "owner": "tester"}
+  ],
+  "exports": [
+    {"file": "apps/web/src/components/sets/set-progress.tsx", "names": ["SetProgress", "SetProgressProps"], "default": false},
+    {"file": "apps/web/src/components/sets/index.ts", "names": ["SetProgress", "SetProgressProps"], "default": false}
+  ],
+  "testids": {
+    "new": [{"id": "set-progress", "file": "apps/web/src/components/sets/set-progress.tsx"}],
+    "existing": [{"id": "site-nav", "file": "apps/web/src/components/layout/site-nav.tsx"}],
+    "templates": [{"template": "{prefix}-filter-country", "file": "apps/web/src/components/catalog/filters.tsx",
+                   "instances": ["catalog-filter-country"]}],
+    "test_only": ["mock-chart"],
+    "removed": ["language-switcher-en"]
+  },
+  "packages": {"added": []},
+  "render_targets_none_reason": "SetProgress is not rendered by any page yet; a later run wires it in",
+  "commits": [
+    {"message": "feat(sets): shared SetProgress block",
+     "files": ["apps/web/src/components/sets/set-progress.tsx", "apps/web/src/components/sets/index.ts",
+               "apps/web/src/components/layout/site-nav.tsx"]}
+  ]
+}

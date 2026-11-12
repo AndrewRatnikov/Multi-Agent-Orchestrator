@@ -49,6 +49,13 @@ DIR=$(dirname "$TARGET")
 while [ ! -d "$DIR" ] && [ "$DIR" != "/" ]; do DIR=$(dirname "$DIR"); done
 REAL_DIR=$(cd "$DIR" && pwd -P)
 REAL_TARGET="$REAL_DIR${TARGET#"$DIR"}"
+# Write follows a symlink in the last component too (code/a.ts -> <target repo>/a.ts),
+# so resolve it fully; realpath also resolves a dangling link to where it would write.
+SYMLINK_NOTE=""
+if [ -L "$TARGET" ]; then
+  REAL_TARGET=$(/usr/bin/python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$TARGET")
+  SYMLINK_NOTE=" (a symlink to $REAL_TARGET)"
+fi
 
 REL="${REAL_TARGET#"$REAL_ROOT"/}"
 if [ "$REL" != "$REAL_TARGET" ]; then   # target is inside the orchestrator project
@@ -111,5 +118,5 @@ if m:
   done
 fi
 
-echo "Blocked by pipeline write guard: the $ROLE agent may only write to paths matching: ${PATTERNS[*]} (relative to the orchestrator project). You tried to write $TARGET. Put your output in your own artifact folder; the orchestrator copies it into the target repo." >&2
+echo "Blocked by pipeline write guard: the $ROLE agent may only write to paths matching: ${PATTERNS[*]} (relative to the orchestrator project). You tried to write $TARGET$SYMLINK_NOTE. Put your output in your own artifact folder; the orchestrator copies it into the target repo." >&2
 exit 2

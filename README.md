@@ -8,7 +8,7 @@ A spec-driven, test-first multi-agent pipeline for Claude Code. Hand it an idea 
 /run-orchestration "add a Budget Summary card component"
 ```
 
-The pipeline runs sequentially, with a review gate after each stage. Each LLM stage is its own subagent (`.claude/agents/orch-*.md`) with a fresh context, its own model and tool limits, and a hook that only lets it write into its own artifact folder. The control flow is a deterministic driver, `.claude/scripts/orch.py`: it runs every mechanical step, owns state (`runs/<id>/state.json`, rendered to `state.md`), retry counters, escalation, routing and git, and tells the main session one thing at a time (spawn this agent, ask this question, stop). The main session only loops: `orch.py next`, do it, `orch.py result`. Tests: `python3 -m pytest .claude/scripts/tests -q`.
+The pipeline runs sequentially, with a review gate after each stage. Each LLM stage is its own subagent (`.claude/agents/orch-*.md`) with a fresh context, its own model and tool limits, and a hook that only lets it write into its own artifact folder. The control flow is a deterministic driver, `.claude/scripts/orch.py`: it runs every mechanical step, owns state (`runs/<id>/state.json`, rendered to `state.md`), retry counters, escalation, routing and git, and tells the main session one thing at a time (spawn this agent, ask this question, stop). The main session only loops: `orch.py next`, do it, `orch.py result`.
 
 ```
 Product agent    → prd.md
@@ -156,6 +156,10 @@ repo-notes/        # notes for target repos that don't have .claude/rules/ yet
 ```
 
 Knowledge about a **target repo** lives in that repo's `.claude/rules/*.md` (and CLAUDE.md), not here. Agents read it from there, and plain Claude Code sessions in that repo pick it up too.
+
+## Run the tests
+
+`python3 -m pytest` from the project root (offline, no Docker; covers `tests/` and `.claude/scripts/tests/`).
 
 ## Status
 

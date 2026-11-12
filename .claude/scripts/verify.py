@@ -101,6 +101,25 @@ ERROR_LINE = re.compile(r"error|fail|✕|✗|×|expected|TS\d{4}|cannot find|not
 SUMMARY_LINE = re.compile(r"^\s*(✖|×)?\s*\d+ problems?\b|potentially fixable|^\s*(Tests?|Test Files|Suites?)\s*:?\s+\d+|"
                           r"^\s*Found \d+ errors?|^\s*\d+ errors? (in|and)\b|ELIFECYCLE|ERR_PNPM_RECURSIVE|npm (ERR!|error) (code|path|command|errno|A complete log)|Exit status \d+", re.I)
 FILE_HEADER = re.compile(r"^(\S*/)?[\w@.\-/]+\.(tsx?|jsx?|mjs|cjs|vue|py|css|json)$")
+# `pnpm -r run lint` echoes each package's command as "<dir> <script>$ <cmd>" and prefixes
+# every output line with "<dir> <script>: ".
+PNPM_ECHO = re.compile(r"^(\S+ \S+?)\$ ", re.M)
+
+
+def _strip_run_prefixes(text):
+    """Drop pnpm's per-package line prefixes, so the tool's own layout (a file header with
+    indented `line:col  error` lines below it) is seen and its line numbers are stripped."""
+    prefixes = sorted(set(PNPM_ECHO.findall(text)), key=len, reverse=True)
+    if not prefixes:
+        return text
+    out = []
+    for raw in text.splitlines():
+        for p in prefixes:
+            if raw.startswith((p + ": ", p + "$ ")):
+                raw = raw[len(p) + 2:]
+                break
+        out.append(raw)
+    return "\n".join(out)
 
 
 def _norm_path(s, worktree):
@@ -124,7 +143,7 @@ def error_lines(text, worktree):
     from collections import Counter
     out = Counter()
     current_file = ""
-    for raw in text.splitlines():
+    for raw in _strip_run_prefixes(text).splitlines():
         stripped = raw.strip()
         if not stripped:
             continue
@@ -137,6 +156,7 @@ def error_lines(text, worktree):
         indented = raw.startswith((" ", "\t"))
         line = re.sub(r"^\s*\d+:\d+\s+", "", line)                          # eslint: '  6:44  error ...'
         line = re.sub(r"\(\d+,\d+\)", "", line)                         # tsc: file.ts(3,1)
+        line = re.sub(r"\bline \d+, col \d+,?\s*", "", line)              # eslint compact: 'line 3, col 1, '
         line = re.sub(r":\d+(:\d+)?\b", "", line)                         # file.ts:3:1
         line = re.sub(r"\(?\d+(\.\d+)?\s?(ms|s)\)?", "", line)            # durations
         line = re.sub(r"\d{4}-\d\d-\d\dT[\d:.]+Z?", "", line)             # timestamps
