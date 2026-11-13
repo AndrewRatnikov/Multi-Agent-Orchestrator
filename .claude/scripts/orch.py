@@ -121,6 +121,24 @@ def write(path, text):
     os.replace(tmp, path)
 
 
+TITLE_MAX = 64
+
+
+def task_title(task, limit=TITLE_MAX):
+    """One line for commit subjects, memory.md's run history, report.md and state.md: the task's
+    first non-empty line, without markdown markers, cut at a word boundary. The full task stays
+    in state.json and runs/<id>/task.md; agents get the full text."""
+    line = next((l.strip() for l in (task or "").splitlines() if l.strip()), "")
+    line = re.sub(r"^(#+|[-*>]|\d+\.)\s+", "", line)
+    line = re.sub(r"\s+", " ", line).replace("|", "/").strip()
+    if len(line) <= limit:
+        return line.rstrip(" .,;:") or "untitled task"
+    cut = line[:limit]
+    if " " in cut[limit // 2:]:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" .,;:(-") + "…"
+
+
 # ── subprocess helpers (tests replace `call`) ─────────────────────────────────
 
 def call(script, *args):
@@ -220,6 +238,10 @@ class Run:
     def repo(self):
         return self.st["repo"]
 
+    @property
+    def title(self):
+        return self.st.get("title") or task_title(self.st.get("task", ""))
+
     # persistence
     def load(self, write_import=True):
         if not os.path.isdir(self.dir):
@@ -243,6 +265,17 @@ class Run:
         for k in MANUAL_FIELDS:
             new = fields.get(k, "")
             old = self.st.get(k) or ""
+            if k == "task":
+                # state.md holds the one-line title; only a real edit of that line replaces the task
+                first = next((l.strip() for l in old.splitlines() if l.strip()), "")
+                if new in ("", old, first, self.title):
+                    continue
+                self.st["task"] = new
+                self.st["title"] = task_title(new)
+                write(self.path("task.md"), new + "\n")
+                self.report("[state] task changed by hand in state.md")
+                changed = True
+                continue
             if new != old:
                 self.st[k] = (new or None) if k == "render_config_ref" else new
                 if k == "render_config_ref":
@@ -260,6 +293,8 @@ class Run:
             v = st.get(k)
             if k == "size_reasons":
                 v = "; ".join(v or [])
+            if k == "task":
+                v = self.title          # one line: a multi-line value would break this key: value file
             lines.append("{}: {}".format(k, "" if v is None else v))
         if st.get("render_config_ref"):
             lines.append("render_config_ref: {}".format(st["render_config_ref"]))
@@ -962,7 +997,7 @@ def ph_tester_commit(r):
     staged, _ = git(repo, "diff", "--cached", "--quiet")
     if staged != 0:
         rc = r.st["retry_count"]
-        task = r.st["task"]
+        task = r.title
         if rc == 0:
             msg = ("test: {}\n\nWritten test-first, before any implementation. Not yet reviewed — subject "
                    "to the mechanical contract gate and the test-reviewer.\n\nRun: {}").format(task, r.id)
@@ -1331,6 +1366,7 @@ def ph_verify(r):
     if code == 0:
         r.report("[verify] PASS")
         r.ctx.pop("lockfile_tried", None)
+        r.ctx.pop("not_verified", None)
         r.set(step="render")
         r.st["phase"] = "render"
         return None
@@ -1583,7 +1619,7 @@ def ph_done(r):
         "unavailable ({})".format(out.strip().splitlines()[-1] if out.strip() else "no transcript")
     size = "small→standard" if ctx.get("escalated") else st["size"]
     add_run_history(r, "- {} | {} | task: {} | result: PASS | size: {} | tokens: {}".format(
-        r.id, datetime.now().strftime("%Y-%m-%d"), st["task"], size, tokens))
+        r.id, datetime.now().strftime("%Y-%m-%d"), r.title, size, tokens))
     vmd, _ = verify_summary(r)
     checklist = handoff_checklist(r, vmd, ref, orig)
     msg = ["✓ Pipeline complete! Tests passed and the branch is verified.", "",
@@ -1750,15 +1786,17 @@ def cmd_start(a):
         return {"action": "stop", "status": "failed", "message": "git checkout -B {} failed:\n{}".format(branch, o)}
     os.makedirs(r.path("archive"), exist_ok=True)
     ts = now_iso()
-    r.st = {"run_id": run_id, "task": task, "repo": repo, "original_branch": original, "target_branch": branch,
+    r.st = {"run_id": run_id, "task": task, "title": task_title(task), "repo": repo, "original_branch": original, "target_branch": branch,
             "step": "init", "status": "running", "timestamp": ts, "last_artifact": "", "pause_reason": "",
             "retry_count": 0, "verify_retries": 0, "render_retries": 0, "render_setup_retries": 0,
             "coder_slices_done": 0, "architect_retries": 0, "size": "pending",
             "size_override": {"small": "small", "full": "full"}.get(a.size or "", ""), "size_reasons": [],
             "render_config_ref": None, "unattended": bool(a.unattended),
             "phase": "product", "pending": None, "ctx": {}}
-    write(r.path("report.md"), "# Run Report: {}\n\n**Task:** {}\n**Repo:** {}\n**Branch:** {} (from {})\n"
-                               "**Started:** {}\n\n---\n\n## Stage log\n".format(run_id, task, repo, branch, original, ts))
+    write(r.path("task.md"), task + "\n")
+    full = "" if task == r.title else " (full text: `runs/{}/task.md`)".format(run_id)
+    write(r.path("report.md"), "# Run Report: {}\n\n**Task:** {}{}\n**Repo:** {}\n**Branch:** {} (from {})\n"
+                               "**Started:** {}\n\n---\n\n## Stage log\n".format(run_id, r.title, full, repo, branch, original, ts))
     r.save()
     code, dout = r.call("repo-digest.sh", repo, run_id, task)
     r.long_ran = False
@@ -1791,7 +1829,7 @@ RESUME_PHASE = {"product": "product", "architect": "architect", "render-setup": 
 
 def status_lines(r):
     st = r.st
-    return ["Run:     {}".format(st["run_id"]), "Task:    {}".format(st["task"]), "Repo:    {}".format(st["repo"]),
+    return ["Run:     {}".format(st["run_id"]), "Task:    {}".format(r.title), "Repo:    {}".format(st["repo"]),
             "Branch:  {} (from {})".format(st["target_branch"], st["original_branch"]),
             "Step:    {}".format(st["step"]), "Status:  {}".format(st["status"]),
             "Paused:  {}".format(st.get("pause_reason") or ""),

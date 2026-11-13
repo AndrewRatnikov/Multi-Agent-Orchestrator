@@ -93,6 +93,7 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261112_212821 | 2026-11-12 | task: "not found" experience in coin-collector-companion web: custom 404 page + NotFoundContent on coin/set/checklist detail pages for API 404/400 | result: PASS | size: standard | tokens: 9777472 (weighted 2360561)
 
 <!-- Brief log of completed runs. Injected into: curator only -->
 <!-- Example entry:

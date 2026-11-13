@@ -673,3 +673,58 @@ def test_sliced_first_pass(env, monkeypatch):
     sets = [c[3] for c in env.fake.called("coder-slices.py", "set")]
     assert sets[:3] == ["1", "2", "0"]
     assert "[coder] slice 2/2 DONE — 1 files" in env.report()
+
+
+# ── multi-line task: one-line title everywhere a single line is expected ──────
+
+LONG_TASK = ("Add a proper \"not found\" experience to the web app: a custom 404 page for unknown URLs, "
+             "and the same message on detail pages.\n\n## Shared content\n\n- Props: a `variant`\n"
+             "repo: /somewhere/else\nstep: done\n\n## Tests\n\n- each variant")
+
+
+def test_task_title():
+    t = orch.task_title(LONG_TASK)
+    assert "\n" not in t and len(t) <= orch.TITLE_MAX + 1 and t.endswith("…")
+    assert t.startswith('Add a proper "not found" experience')
+    assert orch.task_title("## Fix the login bug.\n\nmore") == "Fix the login bug"
+    assert orch.task_title("a | b") == "a / b"          # memory.md's history line is pipe-separated
+    assert orch.task_title("") == "untitled task"
+
+
+def test_multiline_task_stays_one_line_in_state_commits_report_and_memory(env):
+    inst = env.cmd("start", "--repo", env.repo, "--task", LONG_TASK)
+    env.id = inst["run_id"]
+    title = orch.task_title(LONG_TASK)
+    assert "TASK: " + LONG_TASK in inst["prompt"]       # agents still get the full text
+    run = env.root / "runs" / env.id
+    assert (run / "task.md").read_text() == LONG_TASK + "\n"
+    inst = env.drive(inst)
+    assert inst["status"] == "done", inst
+    st = env.state()
+    assert st["task"] == LONG_TASK and st["title"] == title
+    state_md = (run / "state.md").read_text()
+    assert "task: {}\nrepo: {}\n".format(title, env.repo) in state_md
+    assert "## Shared content" not in state_md and "repo: /somewhere/else" not in state_md
+    assert state_md.count("\nstep: ") == 1
+    assert env.git_log()[0] == "test: " + title
+    rep = env.report()
+    assert "**Task:** {} (full text: `runs/{}/task.md`)".format(title, env.id) in rep
+    assert "## Shared content" not in rep
+    mem = (env.root / "memory.md").read_text()
+    assert "- {} | ".format(env.id) in mem and "task: {} | result: PASS".format(title) in mem
+    assert "## Shared content" not in mem and "## Tests" not in mem
+    # a later load must not mistake the title in state.md for a hand edit of the task
+    env.cmd("next", env.id)
+    assert env.state()["task"] == LONG_TASK
+    assert "task changed by hand" not in env.report()
+
+
+def test_task_edited_by_hand_in_state_md_replaces_task(env):
+    inst = env.cmd("start", "--repo", env.repo, "--task", LONG_TASK)
+    env.id = inst["run_id"]
+    p = env.root / "runs" / env.id / "state.md"
+    p.write_text(p.read_text().replace("task: " + orch.task_title(LONG_TASK), "task: do something else"))
+    env.next()
+    st = env.state()
+    assert st["task"] == "do something else" and st["title"] == "do something else"
+    assert "[state] task changed by hand in state.md" in env.report()

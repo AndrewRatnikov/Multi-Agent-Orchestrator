@@ -43,7 +43,8 @@ user and re-run `start` with `--base continue` or `--base switch`, as its `then`
 Every `orch.py` call prints one JSON instruction. First show the user its `say` lines, if any
 (verbatim; they include the Interface Contract, the run size, the Verify table). Then:
 
-- **`spawn`**: spawn a subagent with the Agent tool: `subagent_type` = `agent`, the `prompt`
+- **`spawn`**: spawn a subagent with the Agent tool. Set `subagent_type` to the **value of the
+  instruction's `agent` field** (e.g. `orch-product`; never the literal word "agent"), and pass the `prompt`
   exactly as given (don't add to it or paste files into it), and `model` when it isn't null. Wait
   for its final report. Write that report, verbatim and complete, to `result_file` (relative to the
   orchestrator root), then run `then`.

@@ -106,6 +106,7 @@ class Tally:
         self.label = label
         self.calls = self.input = self.cw5 = self.cw1h = self.read = self.output = 0
         self.peak = 0
+        self.start_ctx = None   # (timestamp, prompt size) of the earliest call
         self.models = []
         self.first = self.last = None
         self.sources = set()
@@ -132,6 +133,8 @@ class Tally:
             self.models.append(model)
         ts = e.get("timestamp")
         if ts:
+            if self.start_ctx is None or ts < self.start_ctx[0]:
+                self.start_ctx = (ts, inp + read + cw)
             self.first = ts if self.first is None or ts < self.first else self.first
             self.last = ts if self.last is None or ts > self.last else self.last
         self.sources.add(src)
@@ -140,6 +143,8 @@ class Tally:
         for k in ("calls", "input", "cw5", "cw1h", "read", "output"):
             setattr(self, k, getattr(self, k) + getattr(other, k))
         self.peak = max(self.peak, other.peak)
+        if other.start_ctx and (self.start_ctx is None or other.start_ctx[0] < self.start_ctx[0]):
+            self.start_ctx = other.start_ctx
         for m in other.models:
             if m not in self.models:
                 self.models.append(m)
@@ -168,6 +173,7 @@ class Tally:
             "input": self.input, "cache_write": self.cache_write, "cache_write_1h": self.cw1h,
             "cache_read": self.read, "output": self.output, "total": self.total,
             "weighted": self.weighted, "peak_context": self.peak,
+            "start_context": self.start_ctx[1] if self.start_ctx else 0,
             "avg_context": round((self.input + self.cache_write + self.read) / self.calls) if self.calls else 0,
             "first": self.first, "last": self.last,
         }
@@ -430,6 +436,11 @@ def render(run_id, orch, segments, invocations, notes):
           "an Opus token costs more than a Sonnet token.",
           "- **Peak context** is the largest single call's prompt (input + cache read + cache write).",
           "- A run still in progress shows only the calls written so far."]
+    if orch.calls and orch.start_ctx:
+        L.insert(L.index("## Every subagent invocation, in order") - 1,
+                 f"\nOrchestrator context at its first call: {orch.start_ctx[1]:,} tokens (peak {orch.peak:,}). "
+                 "The first figure is what the session carried before the run did anything: system prompt, "
+                 "tools, MCP servers, and any earlier conversation. Start runs in a fresh session to keep it low.")
     if notes:
         L += ["", "## Notes", ""] + [f"- {n}" for n in notes]
     return "\n".join(L) + "\n", everything, agents, numbered
