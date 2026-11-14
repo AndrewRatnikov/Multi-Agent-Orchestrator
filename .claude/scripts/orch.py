@@ -968,6 +968,9 @@ def res_tester(r, res):
     if gaps:
         r.say("The Tester found contract gaps (you may want to resume from architect to fill them):\n" +
               "\n".join("- " + g for g in gaps))
+    # A run whose plan declares no test files (config/docs only) legitimately leaves tests/ empty or absent;
+    # downstream gates (check-contract, run-tests.sh) require the folder to exist.
+    os.makedirs(r.path("tests"), exist_ok=True)
     r.set(step="test-reviewer", last_artifact=r.rel("tests") + "/")
     r.st["phase"] = "tester.paths"
 
@@ -1029,6 +1032,7 @@ def copy_tree(src, dst):
 
 def ph_4a(r):
     r.set(step="test-reviewer", status="running")
+    os.makedirs(r.path("tests"), exist_ok=True)  # config/docs-only runs have no test files
     if r.has_contract():
         code, out = r.call("check-contract.py", r.id, r.repo, "tests")
         if code == 3:
@@ -1057,8 +1061,17 @@ def touch(path):
         os.utime(path, None)
 
 
+def has_test_files(r):
+    return any(files for _, _, files in os.walk(r.path("tests")))
+
+
 def ph_4b(r):
     r.set(step="test-reviewer", status="running")
+    if not has_test_files(r):
+        r.report("[test-reviewer] SKIPPED — no test files in this run (nothing to review)")
+        touch(r.path(".test_reviewer_passed_at"))
+        r.ctx["review_skipped"] = True
+        return after_review_pass(r)
     if r.small() and not r.ctx.get("deferred"):
         r.report("[test-reviewer] SKIPPED — small run (mechanical check 4a passed)")
         touch(r.path(".test_reviewer_passed_at"))
@@ -1204,8 +1217,10 @@ def res_coder(r, res):
         r.report("[coder] CONTRACT_MISMATCH — {}\nrecommendation: {}".format(res.get("detail", ""),
                                                                           res.get("recommendation", "")))
         return mismatch_stop(r)
-    notes = res.get("notes", "")
-    if notes and notes.lower() not in ("none", '"none"'):
+    raw_notes = res.get("notes", "")
+    # notes may be a one-line string or a list (bullets under `notes:`)
+    notes = " ".join(raw_notes) if isinstance(raw_notes, list) else raw_notes
+    if notes and notes.strip().lower() not in ("none", '"none"'):
         r.say("Coder notes (if this is an environment issue, the fix may belong in repo-digest.md's "
               "Test command, not the code): " + notes)
     devs = as_list(res.get("deviations"))

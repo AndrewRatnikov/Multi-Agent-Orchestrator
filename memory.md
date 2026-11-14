@@ -24,6 +24,8 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 
 <!-- Read by: all agents -->
 
+- [active] A run whose plan has no test files (config/docs only) used to stop at 4a with `SETUP_ERROR: tests/ not found`; orch.py now creates the empty `tests/` folder and skips the test-reviewer. If it recurs, check `ph_4a`/`has_test_files` in orch.py. (added: run_20261114_174714)
+- [active] `res_coder` crashed on a RESULT whose `notes:` line is followed by bullets (parsed as a list); orch.py now joins list notes. Keep the Coder's `notes:` handling list-tolerant. (added: run_20261114_174714)
 - [active] After a session restart the shell may default to Node 18 (nvm) and Docker Desktop may be stopped: run-tests.sh fails with a pnpm engine error and verify.py ends INCOMPLETE (DB steps skipped). Prepend `$HOME/.nvm/versions/node/v26.13.0/bin` to PATH (repo .nvmrc = 26) and `open -a Docker` before the sandbox/verify. (added: run_20261110_073521)
 - [active] check-contract.py code-mode `exports` did not recognise `export type { X } from` re-exports (false MISSING_EXPORT); EXPORT_PATTERNS now accepts it. Also: `check-contract.py validate` fails with CREATE_FILE_EXISTS once the branch holds created files, so re-validate against the original branch only. (added: run_20261029_165724)
 - [active] A Tester may leave plan MODIFY test files out of tests/ when they need no change; check-paths then fails with MISSING_FILE. Fix: cp the repo file verbatim into runs/{RUN_ID}/tests/ (no diff) instead of letting the Tester re-type it. (added: run_20261022_204015)
@@ -93,6 +95,7 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261114_174714 | 2026-11-14 | task: Step 0.4 of docs/backlog_growth.md: make GitHub CI match… | result: PASS | size: standard | tokens: 4625480 (weighted 1008423)
 - run_20261112_212821 | 2026-11-12 | task: "not found" experience in coin-collector-companion web: custom 404 page + NotFoundContent on coin/set/checklist detail pages for API 404/400 | result: PASS | size: standard | tokens: 9777472 (weighted 2360561)
 
 <!-- Brief log of completed runs. Injected into: curator only -->

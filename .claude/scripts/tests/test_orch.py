@@ -450,6 +450,23 @@ def test_timeout_review_fail_goes_to_tester(env):
     assert spawn_of("tester")(inst) and "real fetch, mock it" in inst["prompt"]
 
 
+def test_run_without_test_files_skips_test_gates(env):
+    env.responders["tester"] = lambda inst: "## RESULT\nstatus: DONE\ntest_files: 0\ntest_cases: 0\ngaps:\n- none\n"
+    inst = env.drive(env.start())
+    assert inst["action"] == "stop" and env.state().get("pause_reason") != "contract-check-error"
+    assert (env.root / "runs" / env.id / "tests").is_dir()
+    assert "SKIPPED — no test files" in env.report()
+    assert not [i for i in env.spawned if i["stage"] == "test-reviewer"]
+    assert [i for i in env.spawned if i["stage"] == "coder"]
+
+
+def test_coder_notes_as_bullet_list_does_not_crash(env):
+    inst = env.drive(env.start(), until=spawn_of("coder"))
+    env.responders["coder"] = lambda i: "## RESULT\nstatus: DONE\nfiles:\n- src/thing.js (CREATE)\nnotes: fine\n- a bullet\n"
+    inst = env.drive(inst)
+    assert inst["action"] in ("stop", "spawn", "do", "continue")
+
+
 # ── hard stops ────────────────────────────────────────────────────────────────
 
 def test_tests_modified_after_review_stops_without_retry(env):
