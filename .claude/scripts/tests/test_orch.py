@@ -495,6 +495,14 @@ def test_contract_mismatch_pauses(env):
     assert env.fake.called("commit-code.py") == []
 
 
+def test_contract_mismatch_feeds_tester_on_resume(env):
+    env.responders["coder"] = env.agents.mismatch
+    env.drive(env.start())
+    inst = env.cmd("resume", env.id, "--from", "tester")
+    assert inst["action"] == "spawn" and inst["agent"] == "orch-tester"
+    assert "CONTRACT_MISMATCH" in inst["prompt"] and "FEEDBACK" in inst["prompt"]
+
+
 def test_missing_result_block_stops(env):
     env.responders["tester"] = lambda inst: "I wrote the tests."
     inst = env.drive(env.start())
@@ -745,3 +753,205 @@ def test_task_edited_by_hand_in_state_md_replaces_task(env):
     st = env.state()
     assert st["task"] == "do something else" and st["title"] == "do something else"
     assert "[state] task changed by hand in state.md" in env.report()
+
+
+# ── Tester not run when the contract gives it nothing to write ────────────────
+
+def _contract(env, inst, files):
+    p = os.path.join(env.agents.run_dir(inst), "contract.json")
+    open(p, "w").write(json.dumps({"files": files}))
+
+
+def test_tester_not_spawned_when_contract_has_no_tester_files(env):
+    inst = env.drive(env.start(), until=spawn_of("architect"))
+    out = env.agents.architect(inst)
+    _contract(env, inst, [{"path": ".github/workflows/ci.yml", "owner": "coder", "action": "modify"},
+                          {"path": "README.md", "owner": "coder", "action": "modify"}])
+    inst = env.drive(env.feed(inst, out))
+    assert inst["action"] == "stop" and inst["status"] == "done", inst
+    stages = [i["stage"] for i in env.spawned]
+    assert "tester" not in stages and "test-reviewer" not in stages and "coder" in stages
+    rep = env.report()
+    assert "[tester] SKIPPED — contract.json declares no Tester-owned files" in rep
+    assert "SKIPPED — no test files" in rep
+    assert (env.root / "runs" / env.id / "tests").is_dir()
+
+
+def test_tester_spawned_when_contract_has_tester_files(env):
+    inst = env.drive(env.start(), until=spawn_of("architect"))
+    out = env.agents.architect(inst)
+    _contract(env, inst, [{"path": "src/thing.js", "owner": "coder", "action": "create"},
+                          {"path": "tests/thing.test.js", "owner": "tester", "action": "create"}])
+    inst = env.drive(env.feed(inst, out), until=spawn_of("tester"))
+    assert spawn_of("tester")(inst)
+
+
+# ── database preflight at start ───────────────────────────────────────────────
+
+def _verify_json(env, steps):
+    d = env.repo / ".claude"
+    d.mkdir(exist_ok=True)
+    (d / "verify.json").write_text(json.dumps({"steps": steps}))
+    sh("git", "add", "-A", cwd=env.repo)
+    sh("git", "commit", "-q", "-m", "verify config", cwd=env.repo)
+
+
+DB_STEPS = [{"name": "lint", "run": "true"}, {"name": "api e2e", "run": "true", "needs": "database"}]
+
+
+def test_start_asks_when_database_steps_cannot_run(env, monkeypatch):
+    _verify_json(env, DB_STEPS)
+    monkeypatch.setattr(orch, "database_unavailable", lambda: "Docker is installed but not running")
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t")
+    assert inst["action"] == "ask" and inst["id"] == "database"
+    assert "api e2e" in inst["question"] and "not running" in inst["question"]
+    assert "--skip-db-check" in inst["then"]
+    assert not list((env.root / "runs").iterdir())          # nothing created, no branch claimed
+    assert subprocess.run(["git", "-C", str(env.repo), "branch", "--show-current"], stdout=subprocess.PIPE,
+                          text=True).stdout.strip() == "main"
+    # Docker started: the same command goes through
+    monkeypatch.setattr(orch, "database_unavailable", lambda: None)
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t")
+    assert inst["action"] == "spawn"
+
+
+def test_start_anyway_records_that_the_check_was_skipped(env, monkeypatch):
+    _verify_json(env, DB_STEPS)
+    monkeypatch.setattr(orch, "database_unavailable", lambda: "Docker is installed but not running")
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t", "--skip-db-check")
+    env.id = inst["run_id"]
+    assert inst["action"] == "spawn" and "[setup] database check skipped by user" in env.report()
+
+
+def test_unattended_start_records_a_database_warning(env, monkeypatch):
+    _verify_json(env, DB_STEPS)
+    monkeypatch.setattr(orch, "database_unavailable", lambda: "Docker is installed but not running")
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t2", "--unattended")
+    env.id = inst["run_id"]
+    assert inst["action"] == "spawn" and any("WARNING" in s for s in inst["say"])
+    assert "[setup] WARNING: Verify in" in env.report()
+
+
+def test_start_does_not_check_docker_without_database_steps(env, monkeypatch):
+    _verify_json(env, [{"name": "lint", "run": "true"}])
+
+    def boom():
+        raise AssertionError("must not be called")
+    monkeypatch.setattr(orch, "database_unavailable", boom)
+    assert env.cmd("start", "--repo", env.repo, "--task", "t")["action"] == "spawn"
+
+
+# ── RESULT parser: multi-paragraph fields (run_20261117_063301) ───────────────
+
+CODER_MISMATCH_MULTILINE = (
+    "I stopped.\n\n## RESULT\nstatus: CONTRACT_MISMATCH\n"
+    "detail: In lincoln-sample.test.ts the ID list puts 1909-S before 1909-S-VDB. But two assertions expect:\n"
+    "- \"owns 16 of 24 and misses exactly the documented 8\"\n"
+    "- \"owns 8 of 12 and misses four\"\n\n"
+    "A filter keeps the array's order, so one group of these tests fails.\n"
+    "recommendation: resume from tester. Put 'sample-1909-S' first in EXPECTED_MISSING.\n")
+
+
+def test_parse_result_keeps_paragraphs_and_later_keys():
+    res = orch.parse_result(CODER_MISMATCH_MULTILINE)
+    assert res["status"] == "CONTRACT_MISMATCH"
+    assert res["recommendation"].startswith("resume from tester")
+    detail = orch.as_text(res["detail"])
+    assert "misses four" in detail and "A filter keeps the array's order" in detail
+    assert res["_tail"] == ""
+
+
+def test_parse_result_prose_after_last_key_is_still_tail():
+    res = orch.parse_result("## RESULT\nstatus: DONE\nsummary: done\n\nSome closing prose.\nMore prose.\n")
+    assert res["summary"] == "done" and res["_tail"] == "Some closing prose.\nMore prose."
+
+
+def test_mismatch_fix_in():
+    f = orch.mismatch_fix_in
+    assert f({"fix_in": "tests"}) == "tests" and f({"fix_in": "contract"}) == "contract"
+    assert f({"recommendation": "resume from tester and fix the order"}) == "tests"
+    assert f({"recommendation": "resume from architect to correct the contract"}) == "contract"
+    assert f({}) == "contract"
+
+
+# ── CONTRACT_MISMATCH blamed on the tests goes back to the Tester ─────────────
+
+def _mismatch_tests(inst):
+    return ("## RESULT\nstatus: CONTRACT_MISMATCH\nfix_in: tests\n"
+            "detail: tests/thing.test.js expects 'S' but its fixture sets variety VDB:\n- \"ignores owned slots\"\n\n"
+            "The plan's label rule gives 'S VDB'.\nrecommendation: fix the fixture\n")
+
+
+def test_mismatch_in_tests_routes_to_tester_and_completes(env):
+    first = {"done": False}
+
+    def coder(inst):
+        if not first["done"]:
+            first["done"] = True
+            return _mismatch_tests(inst)
+        return env.agents.coder(inst)
+    env.responders["coder"] = coder
+    inst = env.drive(env.start(), until=lambda i: spawn_of("tester")(i) and "CONTRACT_MISMATCH" in i["prompt"])
+    assert "fixture sets variety VDB" in inst["prompt"] and "The plan's label rule" in inst["prompt"]
+    assert "[coder] CONTRACT_MISMATCH (fix in: tests)" in env.report()
+    inst = env.drive(inst, until=spawn_of("test-reviewer"))
+    assert "contradict the plan" in inst["prompt"]
+    inst = env.drive(inst)
+    assert inst["action"] == "stop" and inst["status"] == "done", inst
+    assert "fix tests: add a thing" in env.git_log()[0] or any(l.startswith("fix tests:") for l in env.git_log())
+
+
+def test_mismatch_in_tests_stops_after_two_tester_fixes(env):
+    env.responders["coder"] = _mismatch_tests
+    inst = env.drive(env.start())
+    assert inst["action"] == "stop" and "--from tester" in inst["message"]
+    assert "after 2 automatic Tester" in inst["message"]
+    assert env.state()["pause_reason"] == "contract-mismatch"
+    assert len([i for i in env.spawned if i["stage"] == "tester"]) == 3
+
+
+# ── a missing result file leaves the run waiting ──────────────────────────────
+
+def test_missing_result_file_is_a_usage_error_and_run_keeps_waiting(env):
+    inst = env.start()
+    rc = orch.main(["result", env.id, "product", inst["result_file"]])
+    err = env.capsys.readouterr().err
+    assert rc == 2 and "missing" in err and "still waiting" in err
+    assert env.state()["pending"]["stage"] == "product"
+    assert "FAILED" not in env.report()
+    inst = env.feed(inst, env.agents.product(inst))
+    assert spawn_of("architect")(inst)
+
+
+# ── the summary names what was not verified ───────────────────────────────────
+
+def test_pre_existing_failure_is_reported_as_not_verified(env):
+    env.fake.on("verify.py", _verify(str(env.root), 0, {"pre_existing": ["web build"]},
+                                     "## Pre-existing failures (also fail on `main`; not blocking)\n\n- web build: `x`\n"))
+    inst = env.drive(env.start())
+    assert inst["status"] == "done"
+    assert "not everything was verified" in inst["message"]
+    assert "`web build` fails on `main` too" in inst["message"]
+    assert "## Result: PASS ✓ (with gaps)" in env.report()
+
+
+def test_render_error_then_resume_past_render_is_not_a_skip(env):
+    inst = env.drive(env.start(), until=spawn_of("architect"))
+    out = env.agents.architect(inst)
+    open(os.path.join(env.agents.run_dir(inst), "contract.json"), "w").write(json.dumps(
+        {"render_targets": [{"id": "landing", "route": "/", "state": "signed out", "fixture": "signed-out"}]}))
+    env.fake.on("render-config.py:check", (0, "configured: main"))
+    env.fake.on("render-capture.mjs", _render(str(env.root), 3, "dev server exited before it was ready"))
+    inst = env.drive(env.feed(inst, out))
+    assert inst["action"] == "stop" and env.state()["pause_reason"] == "render-infrastructure-error"
+    assert "--from adr" in inst["message"]
+    inst = env.drive(env.cmd("resume", env.id, "--from", "adr"))
+    assert inst["status"] == "done"
+    assert "ERROR (dev server exited before it was ready)" in inst["message"]
+    assert "not everything was verified" in inst["message"]
+    assert "SKIPPED (not run)" not in inst["message"]
+
+
+def test_clean_run_headline_unchanged(env):
+    inst = env.drive(env.start())
+    assert inst["message"].startswith("✓ Pipeline complete! Tests passed and the branch is verified.")

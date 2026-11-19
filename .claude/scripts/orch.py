@@ -156,6 +156,41 @@ def git(repo, *args):
     return p.returncode, p.stdout.rstrip("\n")
 
 
+def database_unavailable():
+    """Why Verify's throwaway database can't be started right now, or None (tests replace this).
+    The same rule as verify.py: VERIFY_DATABASE_URL, else a running Docker."""
+    if os.environ.get("VERIFY_DATABASE_URL"):
+        return None
+    if not shutil.which("docker"):
+        return "Docker is not installed, and VERIFY_DATABASE_URL is not set"
+    try:
+        code = subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=20).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        code = 1
+    return None if code == 0 else ("Docker is installed but not running (start Docker Desktop), "
+                                   "and VERIFY_DATABASE_URL is not set")
+
+
+def db_preflight(repo):
+    """(step names, reason) when the repo's Verify has database steps that couldn't run now, else None.
+    Read from HEAD, the branch the run starts from, as verify.py reads its config."""
+    code, raw = git(repo, "show", "HEAD:.claude/verify.json")
+    if code != 0:
+        return None
+    try:
+        cfg = json.loads(raw)
+    except ValueError:
+        return None
+    steps = cfg.get("steps") if isinstance(cfg, dict) else None
+    names = [str(st.get("name") or "?") for st in steps or []
+             if isinstance(st, dict) and st.get("needs") == "database"]
+    if not names:
+        return None
+    why = database_unavailable()
+    return (names, why) if why else None
+
+
 # ── RESULT block parser ───────────────────────────────────────────────────────
 
 KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):\s*(.*)$")
@@ -194,6 +229,13 @@ def parse_result(text):
             res[key] = m_key.group(2).strip()
         elif indented and key is not None and isinstance(res.get(key), list) and res[key]:
             res[key][-1] += " " + s
+        elif key is not None and _key_follows(lines, i + 1):
+            # A free-text paragraph inside a field (e.g. a multi-paragraph `detail:` with bullets),
+            # with more fields after it: keep it in the field instead of ending the block there.
+            if isinstance(res.get(key), list):
+                res[key].append(s)
+            else:
+                res[key] = (res[key] + "\n" + s).strip() if res.get(key) else s
         else:
             block_end = i
             break
@@ -202,6 +244,24 @@ def parse_result(text):
     res["_raw"] = "\n".join(l for l in raw).rstrip()
     res["_tail"] = "\n".join(lines[block_end:]).strip()
     return res
+
+
+def _key_follows(lines, i):
+    """True if a `key: value` line follows before the block ends (a fence, a `## ` heading, the end)."""
+    for line in lines[i:]:
+        t = line.strip()
+        if t.startswith("```") or t.startswith("## "):
+            return False
+        if line[:1] not in (" ", "\t") and KEY_RE.match(t):
+            return True
+    return False
+
+
+def as_text(v):
+    """A RESULT field as one string (list items joined line by line)."""
+    if v is None:
+        return ""
+    return "\n".join(v) if isinstance(v, list) else str(v)
 
 
 def as_list(v):
@@ -412,7 +472,15 @@ class Run:
         p = self.st.get("pending")
         if not p or p["action"] not in ("spawn", "ask"):
             raise UsageError("run {} is not waiting for a result".format(self.id))
-        text = read(file if os.path.isabs(file) else os.path.join(ROOT, file))
+        fpath = file if os.path.isabs(file) else os.path.join(ROOT, file)
+        text = read(fpath)
+        if not os.path.isfile(fpath) or (p["action"] == "spawn" and not text.strip()):
+            # Nothing recorded yet: the run keeps waiting, so writing the file and repeating the
+            # command is all it takes (it used to fail the stage and need a resume).
+            raise UsageError("result file {} is {}. Write the {} to it, then run the same command again; the run "
+                             "is still waiting.".format(file, "missing" if not os.path.isfile(fpath) else "empty",
+                                                        "subagent's full report" if p["action"] == "spawn"
+                                                        else "user's answer"))
         if p["action"] == "spawn":
             if stage != p["stage"]:
                 raise UsageError("waiting for stage {}, got {}".format(p["stage"], stage))
@@ -952,8 +1020,25 @@ def ph_tester_enter(r):
     r.st["phase"] = "tester"
 
 
+def tester_has_nothing_to_write(r):
+    """True when contract.json lists files and none is Tester-owned (config/docs-only runs), nothing
+    was sent back to the Tester, and tests/ holds no file from an earlier pass."""
+    files = contract_json(r).get("files")
+    if not isinstance(files, list) or not files:
+        return False        # no usable contract: let the Tester run and the gates judge
+    if any(isinstance(f, dict) and f.get("owner") == "tester" for f in files):
+        return False
+    return not r.ctx.get("feedback", {}).get("tester") and not has_test_files(r)
+
+
 def ph_tester(r):
     r.set(step="tester", status="running")
+    if tester_has_nothing_to_write(r):
+        r.report("[tester] SKIPPED — contract.json declares no Tester-owned files (subagent not run)")
+        os.makedirs(r.path("tests"), exist_ok=True)   # the gates below need the folder
+        r.set(step="test-reviewer", last_artifact=r.rel("tests") + "/")
+        r.st["phase"] = "tester.paths"
+        return None
     return r.spawn("tester", feedback=r.take_feedback("tester"), model=r.model_for("tester"))
 
 
@@ -1159,11 +1244,32 @@ def ph_coder_enter(r):
     r.st["phase"] = "coder"
 
 
-def mismatch_stop(r):
-    return r.stop("Pipeline paused: CONTRACT_MISMATCH detected. The Interface Contract needs correction.\n"
-                  "Run: `/resume-orchestration {} --from architect`\nSee `runs/{}/report.md` for details.\n"
+def mismatch_stop(r, step="architect", why=""):
+    what = ("The tests need correcting" if step == "tester" else "The Interface Contract needs correction")
+    return r.stop("Pipeline paused: CONTRACT_MISMATCH detected. {}.{}\n"
+                  "Run: `/resume-orchestration {} --from {}`\nSee `runs/{}/report.md` for details.\n"
                   "Whatever was already committed this pass is on `{}` in {}."
-                  .format(r.id, r.id, r.st["target_branch"], r.repo), "paused", "contract-mismatch")
+                  .format(what, " " + why if why else "", r.id, step, r.id, r.st["target_branch"], r.repo),
+                  "paused", "contract-mismatch")
+
+
+def mismatch_fix_in(res):
+    """Where the Coder says the fix belongs: `tests` or `contract`. Reads `fix_in:`; for Coders that only
+    write `recommendation:`, falls back to the step it names."""
+    v = as_text(res.get("fix_in")).strip().lower()
+    if v.startswith("test"):
+        return "tests"
+    if v.startswith(("contract", "plan", "architect")):
+        return "contract"
+    reco = as_text(res.get("recommendation")).lower()
+    if re.search(r"\btester\b|from tester|fix (the )?tests?\b", reco) and "architect" not in reco:
+        return "tests"
+    return "contract"
+
+
+MISMATCH_TESTER_NOTE = ("The Coder reported that these tests contradict the plan (CONTRACT_MISMATCH, see FEEDBACK "
+                        "in the Tester's prompt and report.md). Check that the changed tests now follow plan.md and "
+                        "still assert what the PRD asks.")
 
 
 def ph_coder(r):
@@ -1214,9 +1320,32 @@ def res_coder(r, res):
     if res["status"] == "CONTRACT_MISMATCH":
         r.call("coder-slices.py", "set", r.id, "0")
         r.escalate("coder", "the Coder returned CONTRACT_MISMATCH")
-        r.report("[coder] CONTRACT_MISMATCH — {}\nrecommendation: {}".format(res.get("detail", ""),
-                                                                          res.get("recommendation", "")))
-        return mismatch_stop(r)
+        detail, reco = as_text(res.get("detail")), as_text(res.get("recommendation"))
+        fix_in = mismatch_fix_in(res)
+        r.report("[coder] CONTRACT_MISMATCH (fix in: {}) — {}\nrecommendation: {}".format(fix_in, detail, reco))
+        fb = ("The Coder reported a CONTRACT_MISMATCH: these tests contradict plan.md / the Interface Contract. "
+              "Fix the tests (only the ones named), keep everything else unchanged:\n{}\nrecommendation: {}"
+              .format(detail, reco))
+        # A resume from tester/architect needs to know what the Coder found, or it has nothing to fix.
+        r.ctx.setdefault("last_feedback", {})["tester"] = fb
+        if fix_in != "tests":
+            return mismatch_stop(r, "architect")
+        n = r.ctx.get("mismatch_to_tester", 0)
+        if n >= CAP:
+            return mismatch_stop(r, "tester", "The Coder blamed the tests again after {} automatic Tester "
+                                 "fixes, so a person should look first.".format(n))
+        # The tests are the defect: back to the Tester with the Coder's findings, then the gates and a
+        # (delta) review, then the Coder again. Code not yet committed stays in code/ for the next pass.
+        r.ctx["mismatch_to_tester"] = n + 1
+        r.ctx["review_skipped"] = False
+        r.ctx["review_note"] = MISMATCH_TESTER_NOTE
+        r.report("[coder] returning to Tester to fix the tests the Coder named (mismatch fix {}/{})".format(n + 1, CAP))
+        r.set(step="tester")
+        r.apply({"rc": max(r.st["retry_count"], 1), "archive": [("tests", "tests_mismatch_v{}".format(n + 1))],
+                 "feedback": {"tester": fb}, "phase": "tester",
+                 "say": "The Coder found a defect in the tests. Sending it to the Tester (mismatch fix {}/{})..."
+                        .format(n + 1, CAP)})
+        return None
     raw_notes = res.get("notes", "")
     # notes may be a one-line string or a list (bullets under `notes:`)
     notes = " ".join(raw_notes) if isinstance(raw_notes, list) else raw_notes
@@ -1373,6 +1502,23 @@ def md_section(md, heading_prefix):
     return m.group(0).strip() if m else ""
 
 
+def is_tester_file(r, rel):
+    """True when `rel` is a file the Tester wrote. Verify tools report paths relative to the package they ran in
+    (e.g. `src/app/x.test.tsx` for `apps/web/src/app/x.test.tsx`), so also match by path suffix."""
+    if os.path.isfile(r.path("tests", rel)):
+        return True
+    rel = rel.lstrip("./")
+    if not rel:
+        return False
+    base = r.path("tests")
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            full = os.path.relpath(os.path.join(root, name), base).replace(os.sep, "/")
+            if full == rel or full.endswith("/" + rel):
+                return True
+    return False
+
+
 def ph_verify(r):
     r.set(step="verify", status="running")
     code, out = r.call("verify.py", r.repo, r.id)
@@ -1401,7 +1547,7 @@ def ph_verify(r):
             return r.stop("Verify retry cap reached (2/2). Human intervention required.\n\n{}\n\nSee `runs/{}/verify.md`. "
                           "Fix by hand and `/resume-orchestration {} --from verify`, or resume from tester/coder."
                           .format(table, r.id, r.id), "failed", "retry-cap")
-        tester_files = {f: v for f, v in by_file.items() if os.path.isfile(r.path("tests", f))}
+        tester_files = {f: v for f, v in by_file.items() if is_tester_file(r, f)}
         coder_files = {f: v for f, v in by_file.items() if f not in tester_files}
         if not tester_files and not coder_files and not nofile:
             r.report("[verify] FAIL — no file or step to route the failure to")
@@ -1489,8 +1635,13 @@ def ph_render(r):
                      ["Stop; I'll resume with --from render", "Accept the gap and continue"],
                      pause="render-incomplete")
     if code != 0:
-        return r.stop("Render capture hit an infrastructure error (exit {}): {}\nDev-server logs: runs/{}/render/logs/"
-                      .format(code, reason, r.id), "failed", "render-infrastructure-error")
+        # Recorded so a run resumed past this stage (`--from adr`) still reports the gap, not a skip.
+        r.ctx["render_outcome"] = "ERROR ({})".format(reason)
+        r.report("[render] ERROR — {}".format(reason))
+        return r.stop("Render capture hit an infrastructure error (exit {}): {}\nDev-server logs: runs/{}/render/logs/\n"
+                      "Fix the cause and `/resume-orchestration {} --from render`, or continue without a render review "
+                      "with `--from adr` (the summary will say the pages were not reviewed)."
+                      .format(code, reason, r.id, r.id), "failed", "render-infrastructure-error")
     if r.st["render_retries"] > 0 and os.path.exists(r.path("render-review.md")):
         r.archive("render-review.md", "render-review_v{}.md".format(r.st["render_retries"]), move=True)
     return r.spawn("render-reviewer")
@@ -1616,13 +1767,17 @@ def ph_done(r):
     r.set(step="done", status="done", last_artifact=r.rel("code") + "/")
     orig, br, repo = st["original_branch"], st["target_branch"], r.repo
     ref = st.get("render_config_ref")
-    render = ctx.get("render_outcome") or "SKIPPED (not run)"
+    render = ctx.get("render_outcome") or (
+        "NOT RUN (the run was resumed past the render stage)" if render_targets(r) else "SKIPPED (not run)")
+    gaps = verification_gaps(r, render)
     rc_line = ("from render_config_ref {} (not merged yet)".format(ref) if ref and not merged(repo, ref, orig)
                else "from render_config_ref {}".format(ref) if ref
                else "from {}".format(orig) if render.startswith(("PASS", "ACCEPTED")) else "none")
     none_reason = render_none_reason(r)
-    r.report("---\n## Result: PASS ✓\n\nAll tests passed. Pipeline complete.\nRender review: {}\n{}"
+    r.report("---\n## Result: PASS ✓{}\n\nAll tests passed. Pipeline complete.\n{}Render review: {}\n{}"
              "Render config: {}\nFinished: {}".format(
+                 " (with gaps)" if gaps else "",
+                 "".join("Not verified: {}\n".format(g) for g in gaps),
                  render, "Render targets: none ({})\n".format(none_reason) if none_reason else "", rc_line, now_iso()))
     _, log = git(repo, "log", "--oneline", "{}..{}".format(orig, br))
     _, count = git(repo, "rev-list", "--count", "{}..{}".format(orig, br))
@@ -1637,11 +1792,14 @@ def ph_done(r):
         r.id, datetime.now().strftime("%Y-%m-%d"), r.title, size, tokens))
     vmd, _ = verify_summary(r)
     checklist = handoff_checklist(r, vmd, ref, orig)
-    msg = ["✓ Pipeline complete! Tests passed and the branch is verified.", "",
+    head = ("✓ Pipeline complete! Tests passed and the branch is verified." if not gaps else
+            "✓ Pipeline complete, but **not everything was verified** (see below). Tests passed.")
+    msg = [head, "",
            "**Run:** " + r.id,
            "**Branch:** `{}` in {} — {} commit(s) ahead of `{}`:".format(br, repo, count, orig), log, "",
            "Your previous branch (`{0}`) is untouched — switch back anytime with `git checkout {0}`. Everything the "
            "pipeline did is already committed on `{1}`; nothing further needs to be applied.".format(orig, br), "",
+           *(["**Not verified:**", "\n".join("- " + g for g in gaps), ""] if gaps else []),
            "**Verify:**", "\n".join(l for l in vmd.splitlines() if l.startswith("|")), "",
            "**Render review:** " + render_line(r, render), "",
            "**Run size:** `{}` ({})".format(st["size"], "; ".join(st.get("size_reasons") or [])), "",
@@ -1664,6 +1822,22 @@ def ph_done(r):
     return inst
 
 
+def verification_gaps(r, render):
+    """What a PASS did not actually check, one line each, for the summary's headline."""
+    gaps = []
+    _, summ = verify_summary(r)
+    for step in (summ or {}).get("pre_existing") or []:
+        gaps.append("`{}` fails on `{}` too, so it was not checked for this branch either (it can hide new "
+                    "errors). Fix it on `{}` and re-run Verify on this branch.".format(
+                        step, r.st["original_branch"], r.st["original_branch"]))
+    for step in r.ctx.get("accepted_unverified") or []:
+        gaps.append("`{}` could not run (accepted by you).".format(step))
+    if render_targets(r) and render != "PASS":
+        gaps.append("render review `{}`: the {} declared page state(s) were not looked at.".format(
+            render, len(render_targets(r))))
+    return gaps
+
+
 def merged(repo, ref, orig):
     code, _ = git(repo, "merge-base", "--is-ancestor", ref, orig)
     return code == 0
@@ -1680,6 +1854,8 @@ def render_line(r, render):
         if r.ctx.get("rs_failed"):
             why += " Render setup failed: {}.".format(r.ctx["rs_failed"])
         return "`{}`. The pages were **not** looked at; this is not a pass.{}".format(render, why)
+    if render.startswith(("ERROR", "NOT RUN")):
+        return "`{}`. The pages were **not** looked at; this is not a pass.".format(render)
     return "`{}`. The gap remains.".format(render)
 
 
@@ -1790,6 +1966,27 @@ def cmd_start(a):
             return {"action": "ask", "id": "base", "question": q,
                     "options": ["Continue from `{}`".format(current), "Switch to `{}` first".format(default)],
                     "then": "python3 .claude/scripts/orch.py start {} --base continue|switch (by the answer)".format(base_args)}
+    # Verify's database steps need Docker (or VERIFY_DATABASE_URL). Find out now, not an hour in,
+    # when Verify would stop as INCOMPLETE and wait for someone to notice.
+    db_warn = None
+    if a.skip_db_check:
+        db_warn = "database check skipped by user (--skip-db-check)"
+    else:
+        pre = db_preflight(repo)
+        if pre:
+            names, why = pre
+            msg = ("Verify in {} has {} step(s) that need a throwaway database ({}), and it can't be started "
+                   "now: {}. Without it the run does all its work and then stops at Verify as INCOMPLETE."
+                   .format(repo, len(names), ", ".join(names), why))
+            if not a.unattended:
+                args = '--repo "{}" --task "{}"{}{}'.format(
+                    repo, task.replace('"', '\\"'), " --size " + a.size if a.size else "",
+                    " --base " + a.base if a.base else "")
+                return {"action": "ask", "id": "database", "question": msg + " Start Docker Desktop now?",
+                        "options": ["Docker is running now", "Start the run anyway"],
+                        "then": "python3 .claude/scripts/orch.py start {} (re-checks; add --skip-db-check if they "
+                                "chose to start anyway)".format(args)}
+            db_warn = "WARNING: " + msg
     run_id = "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     r = Run(run_id)
     if os.path.exists(r.dir):
@@ -1816,6 +2013,10 @@ def cmd_start(a):
     code, dout = r.call("repo-digest.sh", repo, run_id, task)
     r.long_ran = False
     r.report("[setup] run started on {} from {}".format(branch, original))
+    if db_warn:
+        r.report("[setup] " + db_warn)
+        if db_warn.startswith("WARNING"):
+            r.say(db_warn)
     r.say("Run `{}` started on branch `{}` in {}. Repo digest ready. Starting pipeline...".format(run_id, branch, repo))
     if code != 0:
         r.save()
@@ -1942,6 +2143,7 @@ def main(argv=None):
     s.add_argument("--size", choices=["small", "full"])
     s.add_argument("--unattended", action="store_true")
     s.add_argument("--base", choices=["continue", "switch"])
+    s.add_argument("--skip-db-check", action="store_true")
     n = sub.add_parser("next")
     n.add_argument("run_id")
     rs = sub.add_parser("result")

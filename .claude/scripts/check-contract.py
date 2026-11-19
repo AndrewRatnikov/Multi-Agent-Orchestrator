@@ -501,6 +501,23 @@ def check_render(c, repo, run_dir, plan_path):
 
 # ── checks ───────────────────────────────────────────────────────────────────
 
+def _base_ref(run_dir):
+    """original_branch from the run's state.md, or None."""
+    sp = os.path.join(run_dir, "state.md") if run_dir else None
+    if not sp or not os.path.exists(sp):
+        return None
+    for line in open(sp, encoding="utf-8"):
+        if line.startswith("original_branch:"):
+            return line.split(":", 1)[1].strip() or None
+    return None
+
+
+def _exists_at_ref(repo_path, ref, rel):
+    r = subprocess.run(["git", "-C", repo_path, "cat-file", "-e", "{}:{}".format(ref, rel)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
 def check_validate(c, repo, plan_path, run_dir=None):
     v = []
     table = plan_files_table(plan_path)
@@ -511,11 +528,15 @@ def check_validate(c, repo, plan_path, run_dir=None):
             v.append("CONTRACT_DRIFT: {} is in plan.md's Files changed table but not in contract.json files".format(p))
         for p in sorted(set(c.paths) - set(table)):
             v.append("CONTRACT_DRIFT: {} is in contract.json files but not in plan.md's Files changed table".format(p))
+    base_ref = _base_ref(run_dir)
     for f in c.files:
         p = f.get("path")
-        if f.get("action") == "create" and repo.exists(p):
+        # create/modify are relative to the base branch: files this run already committed on its own branch
+        # (e.g. the Tester's commit) must not make a `create` look like a collision.
+        at_base = _exists_at_ref(repo.path, base_ref, p) if base_ref else repo.exists(p)
+        if f.get("action") == "create" and at_base:
             v.append("CREATE_FILE_EXISTS: {} is marked create but already exists in the repo (use modify)".format(p))
-        if f.get("action") == "modify" and not repo.exists(p):
+        if f.get("action") == "modify" and not at_base:
             v.append("MODIFY_FILE_MISSING: {} is marked modify but doesn't exist in the repo".format(p))
     for x in c.existing:
         if not repo.exists(x["file"]):

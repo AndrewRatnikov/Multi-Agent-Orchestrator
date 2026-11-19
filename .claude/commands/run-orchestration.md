@@ -36,7 +36,10 @@ python3 .claude/scripts/orch.py start --repo "{REPO}" --task "{TASK}" [--size sm
 
 It checks that REPO is clean, claims the branch `orchestrator/{RUN_ID}`, creates the run folder and
 digest, and prints the first instruction. If it prints an `ask` about the starting branch, ask the
-user and re-run `start` with `--base continue` or `--base switch`, as its `then` says.
+user and re-run `start` with `--base continue` or `--base switch`, as its `then` says. If it prints
+an `ask` about the database (Verify needs Docker and it isn't running), ask the user, then re-run
+`start` with the same arguments: unchanged once they say Docker is running (it checks again), or
+with `--skip-db-check` only if they chose to start anyway. Never add that flag on your own.
 
 ## The loop
 
@@ -68,20 +71,20 @@ python3 .claude/scripts/orch.py next {RUN_ID}
 separate `next` after it. `next` is safe to repeat: while an instruction is outstanding it prints
 the same one again (use it if you lose track).
 
-If `orch.py` exits non-zero, show its stderr to the user and stop. Don't work around it: exit 2 is
+If `orch.py` exits 2 saying the result file is missing or empty, write the report (or answer) to that file and run the same command again; the run is still waiting. Otherwise, if `orch.py` exits non-zero, show its stderr to the user and stop. Don't work around it: exit 2 is
 a usage error (usually a result handed to the wrong stage), exit 3 an internal error.
 
 ## What orch.py does at each stage (for orientation; it applies the rules, not you)
 
 | Stage | What happens |
 |---|---|
-| 0 Setup | clean-tree check, branch, run folder, `state`, `report.md`, repo digest |
+| 0 Setup | clean-tree check, Docker check when Verify has database steps, branch, run folder, `state`, `report.md`, repo digest |
 | 1 Product | `orch-product` → prd.md; `NEEDS_INPUT` pauses with an `ask` |
 | 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate` (UI files need `render_targets` or a `render_targets_none_reason`), `check-adr plan` (2 retries); `size-run.py` |
 | 2b Render config | `render-config.py check` (`no-targets:` = UI run the Architect opted out of, reason shown); may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |
-| 3 Tester | `orch-tester`; scope check, `check-paths tests`, autofix, `test:` / `fix tests:` commit |
+| 3 Tester | `orch-tester` (not run when the contract has no Tester-owned files); scope check, `check-paths tests`, autofix, `test:` / `fix tests:` commit |
 | 4 Gate + review | `check-contract tests` (4a), then `orch-test-reviewer` with `review-delta` (4b; skipped on small runs) |
-| 5 Coder | `seed-code`, `coder-slices` on the first pass, `orch-coder`; scope and path checks; `commit-code` |
+| 5 Coder | `CONTRACT_MISMATCH` with `fix_in: tests` → Tester, delta review, Coder again (2 max); `fix_in: contract` stops for the Architect. `seed-code`, `coder-slices` on the first pass, `orch-coder`; scope and path checks; `commit-code` |
 | 5b Code gate | `check-contract code`; `TESTS_MODIFIED_AFTER_REVIEW` stops the run |
 | 6 Sandbox | `run-tests.sh`: PASS, FAIL → Coder, TIMEOUT → Test-Reviewer, ERROR → stop |
 | 6b Verify | `verify.py`; failures go to whoever owns the file (tests → Tester, the rest → Coder) |

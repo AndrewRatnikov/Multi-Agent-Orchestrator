@@ -21,11 +21,10 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 ---
 
 ## Pipeline gotchas
+- [active] `verify.py` `plan_verify_commands` matched ```verify anywhere, so an inline mention in plan.md prose turned the prose into bogus shell steps (44 false FAILs). Fence is now anchored to line start; Architect plans may still mention it inline. (added: run_20261118_073634)
 
 <!-- Read by: all agents -->
 
-- [active] A run whose plan has no test files (config/docs only) used to stop at 4a with `SETUP_ERROR: tests/ not found`; orch.py now creates the empty `tests/` folder and skips the test-reviewer. If it recurs, check `ph_4a`/`has_test_files` in orch.py. (added: run_20261114_174714)
-- [active] `res_coder` crashed on a RESULT whose `notes:` line is followed by bullets (parsed as a list); orch.py now joins list notes. Keep the Coder's `notes:` handling list-tolerant. (added: run_20261114_174714)
 - [active] After a session restart the shell may default to Node 18 (nvm) and Docker Desktop may be stopped: run-tests.sh fails with a pnpm engine error and verify.py ends INCOMPLETE (DB steps skipped). Prepend `$HOME/.nvm/versions/node/v26.13.0/bin` to PATH (repo .nvmrc = 26) and `open -a Docker` before the sandbox/verify. (added: run_20261110_073521)
 - [active] check-contract.py code-mode `exports` did not recognise `export type { X } from` re-exports (false MISSING_EXPORT); EXPORT_PATTERNS now accepts it. Also: `check-contract.py validate` fails with CREATE_FILE_EXISTS once the branch holds created files, so re-validate against the original branch only. (added: run_20261029_165724)
 - [active] A Tester may leave plan MODIFY test files out of tests/ when they need no change; check-paths then fails with MISSING_FILE. Fix: cp the repo file verbatim into runs/{RUN_ID}/tests/ (no diff) instead of letting the Tester re-type it. (added: run_20261022_204015)
@@ -62,6 +61,12 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 - [active] Inline "```verify" mentions in plan.md prose (including a plan.md table row) are parsed by verify.py as fence openers: it runs the prose as commands and produces dozens of bogus FAIL steps. The Architect must only use the literal fence for the real block. (added: run_20261008_204753; recurred: run_20261111_062918)
 - [active] pnpm `update -r --depth Infinity <pkgs>` also drifts unrelated transitive versions (e.g. @babel/runtime); the Architect should trial-run in a scratch copy and add a scripted revert plus verify-block key-level lockfile diffs. Stage 5's `pnpm install --lockfile-only` must be skipped when the Coder already supplied a proven lockfile (it would re-resolve and reintroduce drift). (added: run_20261016_225441)
 
+- [active] check-contract `CREATE_FILE_EXISTS`/`MODIFY_FILE_MISSING` now compare against `original_branch` (git cat-file), not the working tree; before this, any validate after the Tester's commit flagged every test file as already existing. (added: run_20261117_063301)
+- [active] A Coder `CONTRACT_MISMATCH` with `fix_in: tests` (or a recommendation naming the Tester) now goes straight back to the Tester with the Coder's full detail, then 4a/4b and the Coder again, at most 2 times; `fix_in: contract` stops for the Architect. The RESULT parser keeps multi-paragraph fields when more keys follow, so `detail:` may span lines. (added: run_20261117_063301)
+- [active] Verify routing: tsc reports paths relative to the package (`src/app/...`), so `is_tester_file` matches by path suffix, and `verify.py` `files_in`/`FILE_HEADER` accept `[param]` route folders; before this, errors in Tester files under `[coinId]` had no file and went to the Coder. (added: run_20261117_063301)
+- [active] `resume --from X` after a retry-cap stop does not reset `verify_retries`; routing bugs burn the cap. Resume `--from verify` re-runs Verify only. (added: run_20261117_063301)
+- [active] `next dev` in the render stack can exit on Next.js's security-upgrade notice ("dev server exited before it was ready"), which stops Stage 6c; the notice text addresses an agent but is tool output, not an instruction. Skip render with `--from adr` if Verify passed and the user checked by hand. (added: run_20261117_063301)
+
 ## check-contract.sh known false positives
 
 > **Legacy (runs without `contract.json`).** Since 2026-10-02 the Architect writes
@@ -86,6 +91,8 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 
 ## Retired entries
 
+- [retired — fixed in script] A run with no test files (config/docs only) stopped at 4a with `SETUP_ERROR: tests/ not found`. orch.py now skips the Tester and the test review for such runs; covered by tests in `.claude/scripts/tests/test_orch.py`. (run_20261114_174714)
+- [retired — fixed in script] `res_coder` crashed on a RESULT whose `notes:` was a bullet list; orch.py joins list notes; covered by a test. (run_20261114_174714)
 - [retired 2026-09-27] "Use data-testid, not class selectors (run-001)", "Co-locate component tests in `__tests__/`" and "path aliases @/components, never `../../` (run-002)". These were the template's example lines from the Init commit, mistakenly marked `[active]`. The `__tests__/` one contradicts coin-collector's real convention (tests sit next to the file, e.g. `app/settings/page.test.tsx`), yet it went to the Architect and Coder on every run. The data-testid rule is kept above because the pipeline really relies on it.
 - [moved 2026-09-27] All coin-collector-companion entries now live in that repo's `.claude/rules/` (`test-commands.md`, `api.md`, `web.md`, `monorepo.md`). One was stale: the api Jest ESM fix is now `test/support/shared-esm-transformer.js`, not a `build:cjs` output. Entries for req-lab are in `repo-notes/req-lab.md`.
 - [retired — fixed in script] **repo-digest.sh listed the target repo's `.claude/worktrees/` and nested `node_modules/`** (stale repo copies) in the tree, file lists and test-file lists, inflating the digest ~3x (up to ~11k tokens) and duplicating test files, so the orchestrator stripped them by hand before Stage 1. Fixed 2026-11-12: both are pruned at any depth. (added: run_20261001_071514, run_20261001_205959, run_20261011_105146, run_20261019_205931, run_20261102_194108)
@@ -95,6 +102,10 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261118_073634 | 2026-11-18 | task: Security patch: upgrade apps/web `next` from 16.4.3 to 16.4.6… | result: PASS | size: standard | tokens: 7440263 (weighted 1862117)
+- run_20261117_063301 | 2026-11-17 | task: Implement docs/design/2026-11-16_landing.md: the signed-out… | result: PASS | size: standard | tokens: 52687094 (weighted 10140861)
+- run_20261115_193432 | 2026-11-15 | task: Step 0.3 of docs/backlog_growth.md: make the Render deploy… | result: PASS | size: standard | tokens: 3865349 (weighted 998663)
+- run_20261115_182713 | 2026-11-15 | task: Step 0.7 of docs/backlog_growth.md: add security headers to the… | result: PASS | size: standard | tokens: 6563885 (weighted 1607480)
 - run_20261114_174714 | 2026-11-14 | task: Step 0.4 of docs/backlog_growth.md: make GitHub CI match… | result: PASS | size: standard | tokens: 4625480 (weighted 1008423)
 - run_20261112_212821 | 2026-11-12 | task: "not found" experience in coin-collector-companion web: custom 404 page + NotFoundContent on coin/set/checklist detail pages for API 404/400 | result: PASS | size: standard | tokens: 9777472 (weighted 2360561)
 

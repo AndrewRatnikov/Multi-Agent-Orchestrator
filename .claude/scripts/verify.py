@@ -100,7 +100,7 @@ ERROR_LINE = re.compile(r"error|fail|✕|✗|×|expected|TS\d{4}|cannot find|not
 # Tool summary lines whose numbers change whenever the error count changes; never "new errors".
 SUMMARY_LINE = re.compile(r"^\s*(✖|×)?\s*\d+ problems?\b|potentially fixable|^\s*(Tests?|Test Files|Suites?)\s*:?\s+\d+|"
                           r"^\s*Found \d+ errors?|^\s*\d+ errors? (in|and)\b|ELIFECYCLE|ERR_PNPM_RECURSIVE|npm (ERR!|error) (code|path|command|errno|A complete log)|Exit status \d+", re.I)
-FILE_HEADER = re.compile(r"^(\S*/)?[\w@.\-/]+\.(tsx?|jsx?|mjs|cjs|vue|py|css|json)$")
+FILE_HEADER = re.compile(r"^(\S*/)?[\w@.\-/\[\]]+\.(tsx?|jsx?|mjs|cjs|vue|py|css|json)$")
 # `pnpm -r run lint` echoes each package's command as "<dir> <script>$ <cmd>" and prefixes
 # every output line with "<dir> <script>: ".
 PNPM_ECHO = re.compile(r"^(\S+ \S+?)\$ ", re.M)
@@ -182,7 +182,7 @@ def files_in(lines):
     """Repo-relative files mentioned in normalized error lines."""
     files = set()
     for l in lines:
-        for m in re.finditer(r"(?:<WT>/|^|\s)([\w@.\-]+(?:/[\w@.\-]+)+\.(?:tsx?|jsx?|mjs|cjs|vue|py|css|json))\b", l):
+        for m in re.finditer(r"(?:<WT>/|^|\s)([\w@.\-\[\]]+(?:/[\w@.\-\[\]]+)+\.(?:tsx?|jsx?|mjs|cjs|vue|py|css|json))\b", l):
             files.add(m.group(1))
     return sorted(files)
 
@@ -209,7 +209,7 @@ def plan_verify_commands(run_dir):
         return []
     text = open(path).read()
     cmds = []
-    for block in re.findall(r"```verify[^\n]*\n(.*?)```", text, re.S):
+    for block in re.findall(r"^```verify[^\n]*\n(.*?)^```", text, re.S | re.M):
         for line in block.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):

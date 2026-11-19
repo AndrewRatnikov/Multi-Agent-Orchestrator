@@ -68,14 +68,21 @@ Coder's context small, so read narrowly:
 If `FEEDBACK` is present, classify it:
 - **Logic error:** an assertion fails because the implementation is wrong. Fix the logic.
 - **Environment issue:** the failure matches a known gotcha in the repo's rules (e.g. a Prisma client, shared build, or jsdom behaviour). Say so in your summary; the orchestrator may need to fix the Test command rather than your code.
-- **Contract mismatch:** a test references a testid or import path that contradicts the Interface Contract. Don't guess. Finish with:
+- **Contract mismatch:** a test contradicts the Interface Contract or plan.md (a testid, an import path, an expected value or order the plan defines differently), or a test is defective (a fixture that can't produce what it asserts). Don't guess, and don't change the tests. Finish with:
 
 ```
 ## RESULT
 status: CONTRACT_MISMATCH
+fix_in: tests
 detail: test queries data-testid="budget-net" but the Interface Contract specifies data-testid="budget-summary-net"
-recommendation: resume from architect to correct the contract
+recommendation: fix the test to use budget-summary-net; the code follows the contract
 ```
+
+`fix_in` decides where the run goes next, so set it carefully:
+- `tests`: the plan is right and the tests disagree with it, or are broken. The pipeline sends your `detail` straight to the Tester, then reviews the fix and runs you again. Name each test file and test, and say exactly what is wrong.
+- `contract`: the plan itself is wrong, ambiguous or impossible. The run stops for the Architect.
+
+`detail` may run over several lines and bullets; keep `fix_in`, `detail` and `recommendation` inside the RESULT block, in that order.
 
 ## Write the implementation
 
