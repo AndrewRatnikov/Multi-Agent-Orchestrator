@@ -17,6 +17,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import orch  # noqa: E402
 
+REAL_PR_PREFLIGHT = orch.pr_preflight
+
 
 # ── fakes ─────────────────────────────────────────────────────────────────────
 
@@ -184,6 +186,7 @@ def env(tmp_path, monkeypatch, capsys):
     sh("git", "commit", "-q", "-m", "init", cwd=repo)
     fake = Fake(str(root))
     monkeypatch.setattr(orch, "call", fake)
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: [])     # tests that need it restore the real one
     agents = Agents(str(root))
     return Pipe(root, repo, fake, agents, capsys)
 
@@ -969,11 +972,14 @@ def test_clean_run_headline_unchanged(env):
 class FakeGh:
     def __init__(self, existing=None, missing=False):
         self.calls, self.existing, self.missing = [], existing or [], missing
+        self.view = (0, json.dumps({"nameWithOwner": "o/r", "viewerPermission": "WRITE"}))
 
     def __call__(self, args, cwd):
         self.calls.append(list(args))
         if self.missing:
             return 127, "gh (GitHub CLI) is not installed"
+        if args[:2] == ["repo", "view"]:
+            return self.view
         if args[:2] == ["pr", "list"]:
             return 0, json.dumps(self.existing)
         if args[:2] == ["pr", "create"]:
@@ -1087,3 +1093,78 @@ def test_compare_url():
     assert orch.compare_url("git@github.com:o/r.git", "main", "b") == "https://github.com/o/r/compare/main...b?expand=1"
     assert orch.compare_url("https://github.com/o/r", "main", "b").startswith("https://github.com/o/r/compare/")
     assert orch.compare_url("/tmp/x.git", "main", "b") is None
+
+
+# ── pull-request preflight at start ───────────────────────────────────────────
+
+def test_pr_preflight_checks(env, tmp_path, monkeypatch):
+    check = lambda: REAL_PR_PREFLIGHT(str(env.repo))
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    assert "no `origin` remote" in check()[0]
+    _origin(env, tmp_path)
+    assert check() == []
+    fake.view = (0, json.dumps({"nameWithOwner": "o/r", "viewerPermission": "READ"}))
+    assert "read access to o/r" in check()[0]
+    fake.view = (1, "HTTP 401: Bad credentials")
+    assert "Bad credentials" in check()[0] and "gh auth login" in check()[0]
+    monkeypatch.setattr(orch, "gh", FakeGh(missing=True))
+    assert "`gh` is not installed" in check()[0]
+
+
+def test_pr_preflight_push_refused(env, tmp_path, monkeypatch):
+    sh("git", "remote", "add", "origin", str(tmp_path / "nowhere.git"), cwd=env.repo)
+    monkeypatch.setattr(orch, "gh", FakeGh())
+    assert any("git can't push to `origin`" in p for p in REAL_PR_PREFLIGHT(str(env.repo)))
+
+
+def test_start_asks_when_pr_cannot_be_created(env, monkeypatch):
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the GitHub CLI `gh` is not installed"])
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t", "--size", "full")
+    assert inst["action"] == "ask" and inst["id"] == "pull-request"
+    assert "`gh` is not installed" in inst["question"] and "--size full" in inst["then"]
+    assert not list((env.root / "runs").iterdir())               # nothing created, no branch claimed
+    # "Start without a pull request"
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t", "--no-pr")
+    env.id = inst["run_id"]
+    assert inst["action"] == "spawn" and env.state()["pr"] is False
+    assert "[setup] pull request turned off by user" in env.report()
+
+
+def test_start_anyway_and_unattended_keep_the_pr_and_warn(env, monkeypatch):
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the repo has no `origin` remote"])
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t", "--skip-pr-check")
+    env.id = inst["run_id"]
+    assert inst["action"] == "spawn" and env.state()["pr"] is True
+    assert "check skipped by user" in env.report()
+
+
+def test_unattended_start_warns_about_the_pr(env, monkeypatch):
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the repo has no `origin` remote"])
+    inst = env.cmd("start", "--repo", env.repo, "--task", "t", "--unattended")
+    env.id = inst["run_id"]
+    assert inst["action"] == "spawn" and any("pull request" in s and "WARNING" in s for s in inst["say"])
+
+
+def test_no_pr_skips_the_check(env, monkeypatch):
+    def boom(repo):
+        raise AssertionError("must not be called")
+    monkeypatch.setattr(orch, "pr_preflight", boom)
+    assert env.cmd("start", "--repo", env.repo, "--task", "t", "--no-pr")["action"] == "spawn"
+
+
+def test_resume_notes_a_broken_pr_setup(env, monkeypatch):
+    env.fake.sandbox.code, env.fake.sandbox.verdict = 3, "ERROR"
+    env.drive(env.start())
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the GitHub CLI `gh` is not installed"])
+    env.fake.sandbox.code, env.fake.sandbox.verdict = 0, "PASS"
+    inst = env.cmd("resume", env.id, "--from", "sandbox")
+    assert any("pull request at the end won't work" in s for s in inst["say"])
+
+
+def test_pr_now_checks_first(env, monkeypatch):
+    inst = env.drive(env.start())
+    assert inst["status"] == "done"
+    monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the repo has no `origin` remote"])
+    again = env.cmd("pr", env.id, "now")
+    assert "Can't open the pull request yet" in again["message"]

@@ -46,6 +46,11 @@ user and re-run `start` with `--base continue` or `--base switch`, as its `then`
 an `ask` about the database (Verify needs Docker and it isn't running), ask the user, then re-run
 `start` with the same arguments: unchanged once they say Docker is running (it checks again), or
 with `--skip-db-check` only if they chose to start anyway. Never add that flag on your own.
+If it prints an `ask` about the pull request (no `origin` remote, `gh` missing or signed out, no
+write access, or git can't push), show the user the problems and re-run `start` with the same
+arguments: unchanged once they say it's fixed (it checks again), with `--no-pr` if they choose to
+start without a PR, or with `--skip-pr-check` if they choose to start anyway and let the PR step try at
+the end. Never pick one of those flags yourself.
 
 ## The loop
 
@@ -83,7 +88,7 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 
 | Stage | What happens |
 |---|---|
-| 0 Setup | clean-tree check, Docker check when Verify has database steps, branch, run folder, `state`, `report.md`, repo digest |
+| 0 Setup | clean-tree check, Docker check when Verify has database steps, pull-request check (remote, `gh` signed in with write access, a dry-run push) unless `--no-pr`, branch, run folder, `state`, `report.md`, repo digest |
 | 1 Product | `orch-product` → prd.md; `NEEDS_INPUT` pauses with an `ask` |
 | 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate` (UI files need `render_targets` or a `render_targets_none_reason`), `check-adr plan` (2 retries); `size-run.py` |
 | 2b Render config | `render-config.py check` (`no-targets:` = UI run the Architect opted out of, reason shown); may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |

@@ -210,6 +210,56 @@ def gh(args, cwd):
     return run_cmd(["gh"] + list(args), cwd=cwd)
 
 
+PR_WRITE = ("WRITE", "MAINTAIN", "ADMIN")
+
+
+def pr_preflight(repo):
+    """Why the run couldn't open its pull request at the end, one line each ([] when it can).
+    Checks what Stage 8 needs: an `origin` remote, `gh` installed and signed in with write access to
+    that repo, and git allowed to push to it (a dry run, so nothing is sent). Tests replace this."""
+    code, remote = git(repo, "remote", "get-url", "origin")
+    if code != 0 or not remote.strip():
+        return ["the repo has no `origin` remote (add one with `git remote add origin <url>`)"]
+    problems = []
+    code, out = gh(["repo", "view", "--json", "nameWithOwner,viewerPermission"], repo)
+    if code == 127:
+        problems.append("the GitHub CLI `gh` is not installed (`brew install gh`, then `gh auth login`)")
+    elif code != 0:
+        last = out.strip().splitlines()[-1] if out.strip() else "exit {}".format(code)
+        problems.append("`gh` can't open the repo: {} (check `gh auth status`; sign in with `gh auth login`)"
+                        .format(last))
+    else:
+        try:
+            info = json.loads(out or "{}")
+        except ValueError:
+            info = {}
+        perm = (info.get("viewerPermission") or "").upper()
+        if perm and perm not in PR_WRITE:
+            problems.append("the GitHub account `gh` is signed in with has {} access to {}; pushing a branch "
+                            "and opening a PR needs write access".format(perm.lower(), info.get("nameWithOwner")
+                                                                         or "the repo"))
+    code, out = run_cmd(["git", "-C", repo, "push", "--dry-run", "--quiet", "origin",
+                         "HEAD:refs/heads/orchestrator/pr-preflight"], timeout=60)
+    if code != 0:
+        last = out.strip().splitlines()[-1] if out.strip() else "exit {}".format(code)
+        problems.append("git can't push to `origin`: {}".format(last))
+    return problems
+
+
+def start_args(a, repo, task, drop=()):
+    """The `start` arguments as given, to repeat the command after a question."""
+    parts = ['--repo "{}"'.format(repo), '--task "{}"'.format(task.replace('"', '\\"'))]
+    if a.size and "size" not in drop:
+        parts.append("--size " + a.size)
+    if a.base and "base" not in drop:
+        parts.append("--base " + a.base)
+    for flag, on in (("--unattended", a.unattended), ("--no-pr", a.no_pr),
+                     ("--skip-db-check", a.skip_db_check), ("--skip-pr-check", a.skip_pr_check)):
+        if on and flag.lstrip("-").replace("-", "_") not in drop:
+            parts.append(flag)
+    return " ".join(parts)
+
+
 def compare_url(remote, base, branch):
     """GitHub's 'open a pull request' page for a github.com remote, else None."""
     m = re.match(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$",
@@ -1977,6 +2027,10 @@ def cmd_pr(a):
     if a.mode in ("on", "off"):
         r.st["pr"] = a.mode == "on"
         r.report("[pr] turned {} by user".format(a.mode))
+        if a.mode == "on":
+            problems = pr_preflight(r.repo)
+            if problems:
+                r.say("Pull request turned on, but it won't work as things stand: {}.".format("; ".join(problems)))
         r.save()
         if r.st.get("pending"):
             return r.emit(r.st["pending"])     # the run carries on where it was
@@ -1984,6 +2038,10 @@ def cmd_pr(a):
                        "message": "Pull request turned {} for run {}.".format(a.mode, r.id)})
     if r.st.get("step") != "done" or not r.ctx.get("final_message"):
         raise UsageError("run {} hasn't finished; `pr now` only works on a done run".format(r.id))
+    problems = pr_preflight(r.repo)
+    if problems:
+        return r.emit({"action": "stop", "status": "done", "message": "Can't open the pull request yet:\n" +
+                       "\n".join("- " + x for x in problems) + "\nFix that, then run this again."})
     r.st["pending"] = None
     r.st["pr"] = True
     inst = ph_pr(r)
@@ -2130,9 +2188,7 @@ def cmd_start(a):
                 repo, current, default, len(ahead), "\n".join(ahead), current, default)
             if a.unattended:
                 return {"action": "stop", "status": "failed", "message": q}
-            base_args = '--repo "{}" --task "{}"{}{}'.format(repo, task.replace('"', '\\"'),
-                                                             " --size " + a.size if a.size else "",
-                                                             " --no-pr" if a.no_pr else "")
+            base_args = start_args(a, repo, task, drop=("base",))
             return {"action": "ask", "id": "base", "question": q,
                     "options": ["Continue from `{}`".format(current), "Switch to `{}` first".format(default)],
                     "then": "python3 .claude/scripts/orch.py start {} --base continue|switch (by the answer)".format(base_args)}
@@ -2149,14 +2205,32 @@ def cmd_start(a):
                    "now: {}. Without it the run does all its work and then stops at Verify as INCOMPLETE."
                    .format(repo, len(names), ", ".join(names), why))
             if not a.unattended:
-                args = '--repo "{}" --task "{}"{}{}'.format(
-                    repo, task.replace('"', '\\"'), " --size " + a.size if a.size else "",
-                    " --base " + a.base if a.base else "") + (" --no-pr" if a.no_pr else "")
+                args = start_args(a, repo, task)
                 return {"action": "ask", "id": "database", "question": msg + " Start Docker Desktop now?",
                         "options": ["Docker is running now", "Start the run anyway"],
                         "then": "python3 .claude/scripts/orch.py start {} (re-checks; add --skip-db-check if they "
                                 "chose to start anyway)".format(args)}
             db_warn = "WARNING: " + msg
+    # The pull request at the end needs a remote, `gh` and push rights. Find out now, not after the run.
+    pr_warn = None
+    if a.no_pr:
+        pr_warn = "pull request turned off by user (--no-pr)"
+    elif a.skip_pr_check:
+        pr_warn = "pull request check skipped by user (--skip-pr-check); the PR step will still try"
+    else:
+        problems = pr_preflight(repo)
+        if problems:
+            msg = ("This run is set to open a pull request into `{}` when it passes, but it couldn't now:\n{}"
+                   .format(default, "\n".join("- " + x for x in problems)))
+            if not a.unattended:
+                args = start_args(a, repo, task)
+                return {"action": "ask", "id": "pull-request", "question": msg + "\n\nFix it and check again, or "
+                        "start without a PR?",
+                        "options": ["Fixed it, check again", "Start without a pull request",
+                                    "Start anyway; try the PR at the end"],
+                        "then": "python3 .claude/scripts/orch.py start {} (unchanged to check again; add --no-pr "
+                                "for 'without'; add --skip-pr-check for 'anyway')".format(args)}
+            pr_warn = "WARNING: " + msg.replace("\n", " ") + " The PR step will still try at the end."
     run_id = "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     r = Run(run_id)
     if os.path.exists(r.dir):
@@ -2183,10 +2257,11 @@ def cmd_start(a):
     code, dout = r.call("repo-digest.sh", repo, run_id, task)
     r.long_ran = False
     r.report("[setup] run started on {} from {}".format(branch, original))
-    if db_warn:
-        r.report("[setup] " + db_warn)
-        if db_warn.startswith("WARNING"):
-            r.say(db_warn)
+    for w in (db_warn, pr_warn):
+        if w:
+            r.report("[setup] " + w)
+            if w.startswith("WARNING"):
+                r.say(w)
     r.say("Run `{}` started on branch `{}` in {}. Repo digest ready. Starting pipeline...".format(run_id, branch, repo))
     if code != 0:
         r.save()
@@ -2238,6 +2313,13 @@ def cmd_resume(a):
     r.say("\n".join(status_lines(r)))
     r.say("Last report lines:\n" + "\n".join(read(r.path("report.md")).splitlines()[-20:]))
     repo = r.repo
+    if st.get("pr", True) is not False:
+        problems = pr_preflight(repo)
+        if problems:
+            note = ("Note: the pull request at the end won't work as things stand: {}. Fix it before the run "
+                    "finishes, or say \"no PR\" (`orch.py pr {} off`).".format("; ".join(problems), r.id))
+            r.say(note)
+            r.report("[pr] check on resume: " + "; ".join(problems))
     _, dirty = git(repo, "status", "--porcelain")
     _, cur = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     if dirty.strip():
@@ -2318,6 +2400,7 @@ def main(argv=None):
     s.add_argument("--base", choices=["continue", "switch"])
     s.add_argument("--skip-db-check", action="store_true")
     s.add_argument("--no-pr", action="store_true")
+    s.add_argument("--skip-pr-check", action="store_true")
     n = sub.add_parser("next")
     n.add_argument("run_id")
     rs = sub.add_parser("result")

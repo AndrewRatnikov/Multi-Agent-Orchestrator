@@ -170,6 +170,11 @@ commits; no local paths. It opens as a **draft** when something wasn't verified 
 fails on `main`, a render review that didn't run) or when the run is stacked on an unmerged branch.
 A re-run of the same branch updates its open PR. The pipeline never merges.
 
+Before a run starts, it checks that the PR will be possible: an `origin` remote, `gh` installed and
+signed in with write access to the repo, and a dry-run `git push`. If anything is missing it asks
+first: fix it and check again, start without a PR, or start anyway (`--skip-pr-check`). An
+unattended run starts and records a warning. A resume re-checks and only warns.
+
 Turn it off per run with `--no-pr` (or by saying "no PR"); mid-run with
 `python3 .claude/scripts/orch.py pr <run_id> off`. If the push or `gh` fails, the run still passes
 and `python3 .claude/scripts/orch.py pr <run_id> now` retries.
