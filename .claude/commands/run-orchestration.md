@@ -21,7 +21,13 @@ Parse `$ARGUMENTS` as:
 - everything before `--repo` / `--size` is the **task description** (TASK);
 - `--repo <path>` is the target repository (REPO), default `$(pwd)`;
 - `--size small|full` (optional) overrides the automatic run size;
-- `--unattended` (optional): no one is there to answer questions (scheduled or headless runs).
+- `--unattended` (optional): no one is there to answer questions (scheduled or headless runs);
+- `--no-pr` (optional): don't open a pull request at the end. By default the run pushes its branch and
+  opens a PR into the repo's default branch (`main`). Pass `--no-pr` also when the user says so in
+  words ("no PR", "without a PR", "don't open a pull request"), in the arguments or anywhere in this
+  conversation before the run starts. If they say it **during** the run, run
+  `python3 .claude/scripts/orch.py pr {RUN_ID} off` once, then carry on with the instruction it prints
+  (it changes nothing else). `on` turns it back on.
 
 If TASK is empty, ask the user what they want to build and wait for their answer.
 
@@ -57,8 +63,7 @@ Every `orch.py` call prints one JSON instruction. First show the user its `say` 
   the run stays paused and `/resume-orchestration {RUN_ID}` asks again.
 - **`do`**: a small task for you (e.g. trim the repo digest). Do it, then run `then`.
 - **`continue`**: a long mechanical step just finished. Run `then`.
-- **`stop`**: show `message` to the user and end. If it has a `followup`, do that first (see
-  "Stage 7: gotchas").
+- **`stop`**: show `message` to the user and end.
 
 `then` is always one of:
 
@@ -90,7 +95,8 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 | 6b Verify | `verify.py`; failures go to whoever owns the file (tests → Tester, the rest → Coder) |
 | 6c Render | `render-capture.mjs`, then `orch-render-reviewer`; BLOCKING findings → Coder |
 | 6d ADR | `check-adr trivial`, else `orch-adr-writer` and `check-adr adr`; never fails the run |
-| 7 Done | Result block, commit log, `run-usage.py`, memory.md run history, final summary (one render line: PASS, or SKIPPED and why) |
+| 7 Done | Result block, commit log, `run-usage.py`, memory.md run history, the summary (with a "Not verified" list when a PASS left gaps), then a `do` for Stage 7 gotchas |
+| 8 Pull request | `git push -u origin` the run branch and `gh pr create --base main` (or update the open PR for that branch); a **draft** when something wasn't verified or the run is stacked on an unmerged branch. Never merges. Skipped with `--no-pr` / `pr {RUN_ID} off`. A failure (no remote, push rejected, no `gh`) never fails the run: the summary says so, and `orch.py pr {RUN_ID} now` retries |
 
 Retry caps are 2 per counter (`retry_count`, `architect_retries`, `verify_retries`,
 `render_retries`, `render_setup_retries`). A small run escalates to standard on its first
@@ -100,7 +106,8 @@ tests are in `.claude/scripts/tests/test_orch.py`.
 
 ## Stage 7: gotchas
 
-When the final `stop` carries a `followup`, decide whether this run surfaced a gotcha worth
+After the run passes, `orch.py` prints a `do` instruction (`"kind": "gotchas"`) before it opens the
+pull request, so anything you commit here is in the PR. Decide whether this run surfaced a gotcha worth
 remembering (a naming convention, a config quirk, a dependency trap: anything a future
 Architect/Coder/Tester would otherwise rediscover the hard way), and **where it belongs**:
 
@@ -115,6 +122,5 @@ Architect/Coder/Tester would otherwise rediscover the hard way), and **where it 
 - **If it corrects an existing entry**, update or retire that entry instead of adding a
   contradicting one next to it.
 
-Skip this if nothing new was learned; don't pad either file. If you made a `docs(rules)` commit,
-refresh the commit list in the final message with the `git log` command the `followup` gives.
-Then show the user the `stop` message.
+Skip this if nothing new was learned; don't pad either file. Then run its `then`: Stage 8 pushes the
+branch, opens the PR and prints the final `stop`. Show the user that message; it carries the PR link.

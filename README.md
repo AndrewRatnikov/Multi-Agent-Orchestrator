@@ -161,6 +161,19 @@ Knowledge about a **target repo** lives in that repo's `.claude/rules/*.md` (and
 
 `python3 -m pytest` from the project root (offline, no Docker; covers `tests/` and `.claude/scripts/tests/`).
 
+## Pull requests
+
+When a run passes, the pipeline pushes `orchestrator/{run_id}` and opens a pull request into the
+target repo's default branch (`main`) with the GitHub CLI (`gh`, signed in). The body carries the
+PRD summary, the Verify table, what was not verified, the before-you-merge checklist and the
+commits; no local paths. It opens as a **draft** when something wasn't verified (a check that also
+fails on `main`, a render review that didn't run) or when the run is stacked on an unmerged branch.
+A re-run of the same branch updates its open PR. The pipeline never merges.
+
+Turn it off per run with `--no-pr` (or by saying "no PR"); mid-run with
+`python3 .claude/scripts/orch.py pr <run_id> off`. If the push or `gh` fails, the run still passes
+and `python3 .claude/scripts/orch.py pr <run_id> now` retries.
+
 ## Status
 
 🚧 Prototype in progress — see [`prototype-plan.md`](./prototype-plan.md) for the build roadmap.

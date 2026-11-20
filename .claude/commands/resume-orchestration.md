@@ -12,7 +12,7 @@ or git commands by hand, and never edit `state.md`, `state.json` or `report.md`.
 $ARGUMENTS
 ```
 
-Parse `$ARGUMENTS` as `{RUN_ID} [--from {STEP}]`, for example:
+Parse `$ARGUMENTS` as `{RUN_ID} [--from {STEP}] [--no-pr]`, for example:
 - `run_20260626_143022`: resume where the run stopped (the `step` in its state);
 - `run_20260626_143022 --from architect`: resume from a specific step.
 
@@ -70,5 +70,7 @@ What `resume` does, so you can explain it (you don't do any of it yourself):
 
 ## Completion
 
-The last instruction is a `stop` with `status: done`. Handle its `followup` exactly as in
-`run-orchestration.md` ("Stage 7: gotchas"), then show the user the message.
+Near the end comes a `do` with `"kind": "gotchas"`: handle it exactly as in `run-orchestration.md`
+("Stage 7: gotchas"), then run its `then`, which opens the pull request. The last instruction is a
+`stop` with `status: done`; show the user its message. If the user says "no PR" (now or in the
+arguments as `--no-pr`), pass `--no-pr` to `resume`, or run `python3 .claude/scripts/orch.py pr {RUN_ID} off`.

@@ -191,6 +191,32 @@ def db_preflight(repo):
     return (names, why) if why else None
 
 
+def run_cmd(args, cwd=None, timeout=180):
+    """Run a command; (exit, output). Never raises: a missing binary or a timeout is a non-zero exit."""
+    try:
+        p = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           timeout=timeout)
+        return p.returncode, p.stdout.rstrip("\n")
+    except FileNotFoundError:
+        return 127, "{} not found".format(args[0])
+    except subprocess.TimeoutExpired:
+        return 124, "{} timed out after {}s".format(" ".join(args[:3]), timeout)
+
+
+def gh(args, cwd):
+    """The GitHub CLI (tests replace this)."""
+    if not shutil.which("gh"):
+        return 127, "gh (GitHub CLI) is not installed"
+    return run_cmd(["gh"] + list(args), cwd=cwd)
+
+
+def compare_url(remote, base, branch):
+    """GitHub's 'open a pull request' page for a github.com remote, else None."""
+    m = re.match(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$",
+                 remote.strip())
+    return "https://github.com/{}/compare/{}...{}?expand=1".format(m.group(1), base, branch) if m else None
+
+
 # ── RESULT block parser ───────────────────────────────────────────────────────
 
 KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):\s*(.*)$")
@@ -702,6 +728,7 @@ def res_product(r, res):
         return r.stop("The Product agent said DONE but runs/{}/prd.md doesn't exist.".format(r.id),
                       "failed", "missing-artifact")
     r.report("[product] DONE — {}".format(res.get("summary", "")))
+    r.ctx["prd_summary"] = as_text(res.get("summary"))
     r.set(step="architect", last_artifact=r.rel("prd.md"))
     r.say("PRD written: {}".format(res.get("summary", "")))
     r.st["phase"] = "architect"
@@ -1796,7 +1823,8 @@ def ph_done(r):
             "✓ Pipeline complete, but **not everything was verified** (see below). Tests passed.")
     msg = [head, "",
            "**Run:** " + r.id,
-           "**Branch:** `{}` in {} — {} commit(s) ahead of `{}`:".format(br, repo, count, orig), log, "",
+           "**Branch:** `{}` in {} — {{COMMITS}}".format(br, repo), "",
+           "**Pull request:** {PR}", "",
            "Your previous branch (`{0}`) is untouched — switch back anytime with `git checkout {0}`. Everything the "
            "pipeline did is already committed on `{1}`; nothing further needs to be applied.".format(orig, br), "",
            *(["**Not verified:**", "\n".join("- " + g for g in gaps), ""] if gaps else []),
@@ -1812,14 +1840,155 @@ def ph_done(r):
            "- Render review + screenshots: `runs/{0}/render-review.md`, `runs/{0}/render/`\n- ADRs as written "
            "(before commit): `runs/{0}/adr/`\n- Token usage: `runs/{0}/usage.md` (re-measure any time: "
            "`python3 .claude/scripts/run-usage.py {0}`)".format(r.id)]
-    followup = ("Before showing the message: if this run surfaced a gotcha worth remembering, route it as "
+    ctx["final_message"] = "\n".join(msg)
+    ctx["final_checklist"] = checklist
+    ctx["final_gaps"] = gaps
+    ctx["final_render"] = render_line(r, render)
+    ctx["final_verify"] = vmd
+    followup = ("Stage 7 gotchas: if this run surfaced a gotcha worth remembering, route it as "
                 "run-orchestration.md 'Stage 7: gotchas' says (target-repo rule → commit `docs(rules): …` with "
                 "body `Run: {id}` on {br}; pipeline gotcha → memory.md `## Pipeline gotchas`). Skip if nothing "
-                "new was learned. If you made a docs(rules) commit, refresh the commit list with "
-                "`git -C \"{repo}\" log --oneline {orig}..{br}`.").format(id=r.id, br=br, repo=repo, orig=orig)
-    inst = r.stop("\n".join(msg), "done")
-    inst["followup"] = followup
+                "new was learned. Then run `then`: it opens the pull request, which includes that commit."
+                ).format(id=r.id, br=br)
+    inst = r.do(followup, "pr")
+    inst["kind"] = "gotchas"
     return inst
+
+
+# ── Stage 8: pull request ─────────────────────────────────────────────────────
+
+def public_text(r, text):
+    """Text for GitHub: no paths on this machine and no run-folder links (the repo may be public)."""
+    text = re.sub(r"\s*\(\s*`?runs/[^)\n]*\)", "", text)          # (runs/<id>/render/after/x.png)
+    text = re.sub(r",?\s*see `?runs/[^\s`]*`?", "", text)
+    text = re.sub(r"`?runs/{}/[^\s`]*`?".format(re.escape(r.id)), "the run folder", text)
+    for local, name in ((r.repo, os.path.basename(r.repo)), (ROOT, "the orchestrator"),
+                        (os.path.expanduser("~"), "~")):
+        if local:
+            text = text.replace(local, name)
+    return text
+
+
+def pr_body(r, draft_reasons):
+    ctx = r.ctx
+    vmd = ctx.get("final_verify") or ""
+    table = []
+    for l in vmd.splitlines():
+        if l.startswith("|"):
+            cells = [c.strip() for c in l.strip().strip("|").split("|")]
+            table.append("| " + " | ".join(cells[:4]) + " |")       # #, step, result, time: no log paths
+    _, log = git(r.repo, "log", "--format=- %s", "{}..{}".format(r.st["original_branch"], r.st["target_branch"]))
+    parts = ["## What", "", ctx.get("prd_summary") or r.title, ""]
+    if draft_reasons:
+        parts += ["## Why this is a draft", ""] + ["- " + d for d in draft_reasons] + [""]
+    if ctx.get("final_gaps"):
+        parts += ["## Not verified", ""] + ["- " + g for g in ctx["final_gaps"]] + [""]
+    if table:
+        parts += ["## Verify", "", "Run on the committed branch, as CI and the deploy see it.", ""] + table + [""]
+    parts += ["## Render review", "", ctx.get("final_render") or "not run", ""]
+    if ctx.get("final_checklist"):
+        parts += ["## Before you merge", ""] + ["- [ ] " + c for c in ctx["final_checklist"]] + [""]
+    parts += ["## ADRs", "", ctx.get("adr_outcome") or "none", "", "## Commits", "", log, "",
+              "---", "Opened by the AI Orchestrator (run `{}`), after its tests, Verify and reviews passed. "
+              "Nothing was merged; that is your call.".format(r.id)]
+    return public_text(r, "\n".join(parts)) + "\n"
+
+
+def open_pr(r):
+    """Push the run's branch and open (or update) its PR into the default branch. Returns
+    (summary line, details dict). Never fails the run."""
+    repo, br, orig = r.repo, r.st["target_branch"], r.st["original_branch"]
+    base = default_branch(repo)
+    code, remote = git(repo, "remote", "get-url", "origin")
+    if code != 0 or not remote.strip():
+        return "not created: the repo has no `origin` remote.", {"error": "no origin remote"}
+    draft = []
+    if r.ctx.get("final_gaps"):
+        draft.append("not everything was verified (see Not verified).")
+    if orig != base and not merged(repo, orig, base):
+        draft.append("this run was built on `{}`, which isn't merged into `{}` yet; merge that first, or this "
+                     "PR also carries its commits.".format(orig, base))
+    code, out = run_cmd(["git", "-C", repo, "push", "-u", "origin", br])
+    if code != 0:
+        return ("not created: `git push` failed ({}). Push `{}` and open the PR by hand, or re-run "
+                "`python3 .claude/scripts/orch.py pr {} now`.".format(out.strip().splitlines()[-1] if out.strip()
+                                                                      else "exit {}".format(code), br, r.id),
+                {"error": "push failed: " + out[-500:]})
+    body = pr_body(r, draft)
+    write(r.path("pr.md"), body)
+    title = r.title.rstrip("…").rstrip(" .,;:")
+    code, out = gh(["pr", "list", "--head", br, "--state", "open", "--json", "number,url,isDraft"], repo)
+    if code == 127 or code != 0:
+        url = compare_url(remote, base, br)
+        why = out.strip().splitlines()[-1] if out.strip() else "gh exit {}".format(code)
+        return ("branch pushed, but the PR was not created ({}). Open it here: {}".format(
+                    why, url or "GitHub's compare page for `{}`".format(br)),
+                {"error": why, "pushed": True, "compare": url})
+    try:
+        existing = json.loads(out or "[]")
+    except ValueError:
+        existing = []
+    if existing:
+        pr = existing[0]
+        n = str(pr["number"])
+        c1, o1 = gh(["pr", "edit", n, "--title", title, "--body-file", r.path("pr.md")], repo)
+        if bool(draft) != bool(pr.get("isDraft")):
+            gh(["pr", "ready", n] + (["--undo"] if draft else []), repo)
+        if c1 != 0:
+            return "branch pushed; updating PR #{} failed: {}".format(n, o1.strip()[-200:]), {"error": o1[-500:]}
+        return "{} (updated{})".format(pr["url"], ", draft" if draft else ""), \
+            {"url": pr["url"], "draft": bool(draft), "updated": True}
+    args = ["pr", "create", "--base", base, "--head", br, "--title", title, "--body-file", r.path("pr.md")]
+    if draft:
+        args.append("--draft")
+    code, out = gh(args, repo)
+    if code != 0:
+        url = compare_url(remote, base, br)
+        return ("branch pushed, but `gh pr create` failed ({}). Open it here: {}".format(
+                    out.strip().splitlines()[-1] if out.strip() else code, url or br),
+                {"error": out[-500:], "pushed": True})
+    url = (re.findall(r"https://\S+", out) or [out.strip()])[-1]
+    return "{}{}".format(url, " (draft: {})".format(" ".join(draft)) if draft else ""), \
+        {"url": url, "draft": bool(draft)}
+
+
+def ph_pr(r):
+    st, ctx = r.st, r.ctx
+    repo, br, orig = r.repo, st["target_branch"], st["original_branch"]
+    _, log = git(repo, "log", "--oneline", "{}..{}".format(orig, br))
+    _, count = git(repo, "rev-list", "--count", "{}..{}".format(orig, br))
+    commits = "{} commit(s) ahead of `{}`:\n{}".format(count, orig, log)
+    if st.get("pr", True) is False:
+        line = ("not created (you asked for no PR). To open one later: "
+                "`python3 .claude/scripts/orch.py pr {} now`.".format(r.id))
+        r.report("[pr] SKIPPED — turned off for this run")
+        ctx["pr"] = {"skipped": True}
+    else:
+        line, info = open_pr(r)
+        ctx["pr"] = info
+        r.report("[pr] {}".format(("OPENED " if info.get("url") else "NOT CREATED — ") + line))
+    msg = (ctx.get("final_message") or "✓ Pipeline complete.").replace("{COMMITS}", commits).replace("{PR}", line)
+    r.st["phase"] = "stopped"
+    return r.stop(msg, "done")
+
+
+def cmd_pr(a):
+    r = Run(a.run_id).load()
+    if a.mode in ("on", "off"):
+        r.st["pr"] = a.mode == "on"
+        r.report("[pr] turned {} by user".format(a.mode))
+        r.save()
+        if r.st.get("pending"):
+            return r.emit(r.st["pending"])     # the run carries on where it was
+        return r.emit({"action": "stop", "status": r.st.get("status"),
+                       "message": "Pull request turned {} for run {}.".format(a.mode, r.id)})
+    if r.st.get("step") != "done" or not r.ctx.get("final_message"):
+        raise UsageError("run {} hasn't finished; `pr now` only works on a done run".format(r.id))
+    r.st["pending"] = None
+    r.st["pr"] = True
+    inst = ph_pr(r)
+    r.save()
+    return r.emit(inst)
 
 
 def verification_gaps(r, render):
@@ -1907,7 +2076,7 @@ PHASES = {
     "tester.commit": ph_tester_commit, "4a": ph_4a, "4b": ph_4b,
     "coder.enter": ph_coder_enter, "coder": ph_coder, "coder.slice": ph_coder_slice, "coder.done": ph_coder_done,
     "5b": ph_5b, "sandbox": ph_sandbox, "verify": ph_verify, "render": ph_render,
-    "adr": ph_adr, "adr.retry": ph_adr_retry, "done": ph_done,
+    "adr": ph_adr, "adr.retry": ph_adr_retry, "done": ph_done, "pr": ph_pr,
 }
 RESULTS = {"product": res_product, "architect": res_architect, "render-setup": res_render_setup,
            "tester": res_tester, "test-reviewer": res_test_reviewer, "coder": res_coder,
@@ -1961,8 +2130,9 @@ def cmd_start(a):
                 repo, current, default, len(ahead), "\n".join(ahead), current, default)
             if a.unattended:
                 return {"action": "stop", "status": "failed", "message": q}
-            base_args = '--repo "{}" --task "{}"{}'.format(repo, task.replace('"', '\\"'),
-                                                           " --size " + a.size if a.size else "")
+            base_args = '--repo "{}" --task "{}"{}{}'.format(repo, task.replace('"', '\\"'),
+                                                             " --size " + a.size if a.size else "",
+                                                             " --no-pr" if a.no_pr else "")
             return {"action": "ask", "id": "base", "question": q,
                     "options": ["Continue from `{}`".format(current), "Switch to `{}` first".format(default)],
                     "then": "python3 .claude/scripts/orch.py start {} --base continue|switch (by the answer)".format(base_args)}
@@ -1981,7 +2151,7 @@ def cmd_start(a):
             if not a.unattended:
                 args = '--repo "{}" --task "{}"{}{}'.format(
                     repo, task.replace('"', '\\"'), " --size " + a.size if a.size else "",
-                    " --base " + a.base if a.base else "")
+                    " --base " + a.base if a.base else "") + (" --no-pr" if a.no_pr else "")
                 return {"action": "ask", "id": "database", "question": msg + " Start Docker Desktop now?",
                         "options": ["Docker is running now", "Start the run anyway"],
                         "then": "python3 .claude/scripts/orch.py start {} (re-checks; add --skip-db-check if they "
@@ -2003,7 +2173,7 @@ def cmd_start(a):
             "retry_count": 0, "verify_retries": 0, "render_retries": 0, "render_setup_retries": 0,
             "coder_slices_done": 0, "architect_retries": 0, "size": "pending",
             "size_override": {"small": "small", "full": "full"}.get(a.size or "", ""), "size_reasons": [],
-            "render_config_ref": None, "unattended": bool(a.unattended),
+            "render_config_ref": None, "unattended": bool(a.unattended), "pr": not a.no_pr,
             "phase": "product", "pending": None, "ctx": {}}
     write(r.path("task.md"), task + "\n")
     full = "" if task == r.title else " (full text: `runs/{}/task.md`)".format(run_id)
@@ -2056,6 +2226,9 @@ def status_lines(r):
 def cmd_resume(a):
     r = Run(a.run_id).load()
     st = r.st
+    if getattr(a, "no_pr", False):
+        st["pr"] = False
+        r.report("[pr] turned off by user (resume --no-pr)")
     frm = a.from_step or st.get("step")
     if frm not in RESUME_PHASE:
         if frm == "done":
@@ -2144,6 +2317,7 @@ def main(argv=None):
     s.add_argument("--unattended", action="store_true")
     s.add_argument("--base", choices=["continue", "switch"])
     s.add_argument("--skip-db-check", action="store_true")
+    s.add_argument("--no-pr", action="store_true")
     n = sub.add_parser("next")
     n.add_argument("run_id")
     rs = sub.add_parser("result")
@@ -2153,6 +2327,10 @@ def main(argv=None):
     rm = sub.add_parser("resume")
     rm.add_argument("run_id")
     rm.add_argument("--from", dest="from_step")
+    rm.add_argument("--no-pr", action="store_true")
+    pq = sub.add_parser("pr")
+    pq.add_argument("run_id")
+    pq.add_argument("mode", choices=["on", "off", "now"])
     stt = sub.add_parser("status")
     stt.add_argument("run_id")
     a = ap.parse_args(argv)
@@ -2167,6 +2345,8 @@ def main(argv=None):
             out(r.advance())
         elif a.cmd == "resume":
             out(cmd_resume(a))
+        elif a.cmd == "pr":
+            out(cmd_pr(a))
         elif a.cmd == "status":
             r = Run(a.run_id).load(write_import=False)
             print("\n".join(status_lines(r)))

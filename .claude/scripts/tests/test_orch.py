@@ -192,6 +192,7 @@ class Pipe:
     def __init__(self, root, repo, fake, agents, capsys):
         self.root, self.repo, self.fake, self.agents, self.capsys = root, repo, fake, agents, capsys
         self.id = None
+        self.gotchas = []
         self.responders = {"product": agents.product, "architect": agents.architect, "tester": agents.tester,
                            "test-reviewer": agents.reviewer(), "coder": agents.coder,
                            "render-reviewer": agents.render_reviewer(), "adr": agents.adr}
@@ -230,6 +231,10 @@ class Pipe:
         for _ in range(max_steps):
             if until and until(inst):
                 return inst
+            if inst["action"] == "do" and inst.get("kind") == "gotchas":
+                self.gotchas.append(inst)          # the main session records gotchas, then runs `then`
+                inst = self.cmd("next", inst["run_id"])
+                continue
             if inst["action"] != "spawn":
                 return inst
             self.spawned.append(inst)
@@ -296,7 +301,9 @@ def test_happy_path_standard_run(env):
     assert "## Run history\n- {} |".format(env.id) in mem and "size: standard | tokens: 100 (weighted 40)" in mem
     state_md = (env.root / "runs" / env.id / "state.md").read_text()
     assert "step: done\nstatus: done\n" in state_md and "retry_count: 0\n" in state_md
-    assert "followup" in inst
+    assert len(env.gotchas) == 1 and "Stage 7 gotchas" in env.gotchas[0]["message"]
+    assert "**Pull request:** not created: the repo has no `origin` remote." in inst["message"]
+    assert "{COMMITS}" not in inst["message"] and "commit(s) ahead of `main`" in inst["message"]
 
 
 def test_ui_run_without_targets_says_skipped_and_why(env):
@@ -663,7 +670,7 @@ def test_old_run_without_state_json_is_imported_and_resumable(env):
     (d / "report.md").write_text("# Run Report\n\n## Stage log\n")
     (d / "repo-digest.md").write_text("## Test command\n```\nnpm test\n```\n")
     env.id = rid
-    inst = env.cmd("resume", rid)
+    inst = env.drive(env.cmd("resume", rid))
     st = env.state()
     assert st["retry_count"] == 1 and st["verify_retries"] == 0 and st["step"] in ("render", "adr", "done")
     assert inst["status"] == "done"
@@ -955,3 +962,128 @@ def test_render_error_then_resume_past_render_is_not_a_skip(env):
 def test_clean_run_headline_unchanged(env):
     inst = env.drive(env.start())
     assert inst["message"].startswith("✓ Pipeline complete! Tests passed and the branch is verified.")
+
+
+# ── Stage 8: pull request into the default branch ───────────────────────────
+
+class FakeGh:
+    def __init__(self, existing=None, missing=False):
+        self.calls, self.existing, self.missing = [], existing or [], missing
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        if self.missing:
+            return 127, "gh (GitHub CLI) is not installed"
+        if args[:2] == ["pr", "list"]:
+            return 0, json.dumps(self.existing)
+        if args[:2] == ["pr", "create"]:
+            self.body = open(args[args.index("--body-file") + 1]).read()
+            return 0, "Creating pull request\nhttps://github.com/o/r/pull/9"
+        return 0, ""
+
+    def made(self, verb):
+        return [c for c in self.calls if c[:2] == ["pr", verb]]
+
+
+def _origin(env, tmp_path):
+    bare = tmp_path / "origin.git"
+    sh("git", "init", "-q", "--bare", str(bare))
+    sh("git", "remote", "add", "origin", str(bare), cwd=env.repo)
+    sh("git", "push", "-q", "origin", "main", cwd=env.repo)
+    return bare
+
+
+def _remote_branches(bare):
+    return subprocess.run(["git", "-C", str(bare), "branch", "--format=%(refname:short)"], stdout=subprocess.PIPE,
+                          text=True).stdout.split()
+
+
+def test_pr_opened_into_main_after_gotchas(env, tmp_path, monkeypatch):
+    bare = _origin(env, tmp_path)
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    inst = env.drive(env.start())
+    assert inst["status"] == "done", inst
+    assert "orchestrator/" + env.id in _remote_branches(bare)
+    create = fake.made("create")[0]
+    assert create[create.index("--base") + 1] == "main" and create[create.index("--head") + 1] == "orchestrator/" + env.id
+    assert "--draft" not in create
+    assert "**Pull request:** https://github.com/o/r/pull/9" in inst["message"]
+    assert "[pr] OPENED https://github.com/o/r/pull/9" in env.report()
+    body = fake.body
+    assert "## Verify" in body and "## Commits" in body and "Nothing was merged" in body
+    for local in (str(env.root), str(env.repo), "runs/" + env.id + "/"):
+        assert local not in body
+    assert env.gotchas, "the gotcha step must come before the PR"
+
+
+def test_pr_is_draft_when_something_was_not_verified(env, tmp_path, monkeypatch):
+    _origin(env, tmp_path)
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    env.fake.on("verify.py", _verify(str(env.root), 0, {"pre_existing": ["web build"]},
+                                     "## Pre-existing failures (also fail on `main`; not blocking)\n\n- web build: `x`\n"))
+    inst = env.drive(env.start())
+    assert "--draft" in fake.made("create")[0]
+    assert "## Why this is a draft" in fake.body and "web build" in fake.body
+    assert "(draft:" in inst["message"]
+
+
+def test_no_pr_flag_skips_push_and_pr(env, tmp_path, monkeypatch):
+    bare = _origin(env, tmp_path)
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    inst = env.cmd("start", "--repo", env.repo, "--task", "add a thing", "--no-pr")
+    env.id = inst["run_id"]
+    inst = env.drive(inst)
+    assert inst["status"] == "done"
+    assert fake.calls == [] and _remote_branches(bare) == ["main"]
+    assert "not created (you asked for no PR)" in inst["message"]
+    assert "[pr] SKIPPED" in env.report()
+
+
+def test_pr_turned_off_mid_run(env, tmp_path, monkeypatch):
+    _origin(env, tmp_path)
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    inst = env.drive(env.start(), until=spawn_of("coder"))
+    again = env.cmd("pr", env.id, "off")
+    assert again["action"] == "spawn" and again["stage"] == "coder"     # the run carries on where it was
+    inst = env.drive(inst)
+    assert inst["status"] == "done" and fake.calls == []
+    assert "[pr] turned off by user" in env.report()
+
+
+def test_existing_pr_is_updated_not_duplicated(env, tmp_path, monkeypatch):
+    _origin(env, tmp_path)
+    fake = FakeGh(existing=[{"number": 7, "url": "https://github.com/o/r/pull/7", "isDraft": False}])
+    monkeypatch.setattr(orch, "gh", fake)
+    inst = env.drive(env.start())
+    assert fake.made("create") == [] and fake.made("edit")[0][2] == "7"
+    assert "https://github.com/o/r/pull/7 (updated)" in inst["message"]
+
+
+def test_pr_failures_never_fail_the_run(env, tmp_path, monkeypatch):
+    _origin(env, tmp_path)
+    monkeypatch.setattr(orch, "gh", FakeGh(missing=True))
+    inst = env.drive(env.start())
+    assert inst["status"] == "done"
+    assert "branch pushed, but the PR was not created (gh (GitHub CLI) is not installed)" in inst["message"]
+    # then `pr now` retries on the finished run
+    fake = FakeGh()
+    monkeypatch.setattr(orch, "gh", fake)
+    again = env.cmd("pr", env.id, "now")
+    assert again["status"] == "done" and fake.made("create")
+
+
+def test_push_failure_is_reported(env, tmp_path, monkeypatch):
+    sh("git", "remote", "add", "origin", str(tmp_path / "nowhere.git"), cwd=env.repo)
+    monkeypatch.setattr(orch, "gh", FakeGh())
+    inst = env.drive(env.start())
+    assert inst["status"] == "done" and "not created: `git push` failed" in inst["message"]
+
+
+def test_compare_url():
+    assert orch.compare_url("git@github.com:o/r.git", "main", "b") == "https://github.com/o/r/compare/main...b?expand=1"
+    assert orch.compare_url("https://github.com/o/r", "main", "b").startswith("https://github.com/o/r/compare/")
+    assert orch.compare_url("/tmp/x.git", "main", "b") is None
