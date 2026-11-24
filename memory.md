@@ -21,6 +21,8 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 ---
 
 ## Pipeline gotchas
+- [active] `resume` only passes `answers-{STEP}.md` to the spawn prompt when the run was paused on questions; for a change request after a finished run the file is ignored. Add `ANSWERS: runs/{RUN_ID}/answers-{STEP}.md` to the spawn prompt by hand (and tell the user). (added: run_20261122_084533)
+- [active] A plan Verification line like `git diff --quiet ... -- dir/` must not cover files the plan itself MODIFYs (e.g. a README in that dir); add `':(exclude)path'`, or Verify fails and the Coder reports CONTRACT_MISMATCH. (added: run_20261122_084533)
 - [active] `verify.py` `plan_verify_commands` matched ```verify anywhere, so an inline mention in plan.md prose turned the prose into bogus shell steps (44 false FAILs). Fence is now anchored to line start; Architect plans may still mention it inline. (added: run_20261118_073634)
 
 <!-- Read by: all agents -->
@@ -66,6 +68,8 @@ Status values: `active` | `superseded` | `retired`. The orchestrator (main sessi
 - [active] Verify routing: tsc reports paths relative to the package (`src/app/...`), so `is_tester_file` matches by path suffix, and `verify.py` `files_in`/`FILE_HEADER` accept `[param]` route folders; before this, errors in Tester files under `[coinId]` had no file and went to the Coder. (added: run_20261117_063301)
 - [active] `resume --from X` after a retry-cap stop does not reset `verify_retries`; routing bugs burn the cap. Resume `--from verify` re-runs Verify only. (added: run_20261117_063301)
 - [active] `next dev` in the render stack can exit on Next.js's security-upgrade notice ("dev server exited before it was ready"), which stops Stage 6c; the notice text addresses an agent but is tool output, not an instruction. Skip render with `--from adr` if Verify passed and the user checked by hand. (added: run_20261117_063301)
+- [active] A render capture side marked "ok" (reached) is not proof the page loaded: on the before side the ready element is not enforced, so check `render/{before,after}/*.txt` and `*.console.json` when one side is INCOMPLETE. If both show the page's error state with CORS blocks, the render config is at fault, not the change (run_20261123_220432: `dev-stack.sh` built `CORS_ORIGIN` from `$PORT` after reassigning it to the API port; fixed on chore/render-config). The before captures there also kept their CORS errors after the fix, so expect no visual baseline for that resume. (added: run_20261123_220432)
+- [active] A RESULT block whose fields say "unchanged" (e.g. a minimal Tester retry that only reports its edit) is rejected as malformed and stops the run; the report needs real values for every key. `resume --from tester` then archives `tests/` and re-spawns the Tester, so keep the full report on retries. (added: run_20261121_180454)
 
 ## check-contract.sh known false positives
 
@@ -102,6 +106,21 @@ The script greps `plan.md` and the test/code files with regexes, so these cases 
 ---
 
 ## Run history
+- run_20261122_084533 | 2026-11-24 | task: Add images to the Ukrainian part of the catalog… | result: PASS | size: standard | tokens: 35957223 (weighted 7884674)
+- run_20261123_220432 | 2026-11-23 | task: Add one analytics event that shows which coins people look for… | result: PASS | size: standard | tokens: 12810607 (weighted 2575588)
+- run_20261122_084533 | 2026-11-22 | task: Add images to the Ukrainian part of the catalog… | result: PASS | size: standard | tokens: 16701834 (weighted 4293911)
+- run_20261121_222133 | 2026-11-22 | task: Close the gaps that scripts/import-catalog/fixtures/README.md… | result: PASS | size: standard | tokens: 15552871 (weighted 5004194)
+- run_20261121_211337 | 2026-11-21 | task: Implement growth backlog 2.5 (docs/backlog_growth.md) from the… | result: PASS | size: standard | tokens: 14562671 (weighted 2934743)
+- run_20261121_195917 | 2026-11-21 | task: Implement growth backlog 2.1 (docs/backlog_growth.md) for… | result: PASS | size: standard | tokens: 11975943 (weighted 2539178)
+- run_20261121_180454 | 2026-11-21 | task: Add a fixture generator to scripts/import-catalog… | result: PASS | size: standard | tokens: 12790837 (weighted 3192394)
+- run_20261121_173317 | 2026-11-21 | task: Make scripts/import-catalog/import-coins.ts fast enough for… | result: PASS | size: standard | tokens: 4859518 (weighted 1321774)
+- run_20261121_170400 | 2026-11-21 | task: Fix denomination ordering in packages/shared before the catalog… | result: PASS | size: standard | tokens: 5235579 (weighted 1516293)
+- run_20261121_160034 | 2026-11-21 | task: Prepare the app for the custom domain coincompanion.app (web)… | result: PASS | size: standard | tokens: 5720059 (weighted 1625049)
+- run_20261120_231529 | 2026-11-21 | task: Implement ~/Projects/minima-spend/plans/split-localdb-orchestrat… | result: PASS | size: standard | tokens: 13663285 (weighted 3460887)
+- run_20261120_225014 | 2026-11-21 | task: Implement growth backlog 0.6 (docs/backlog_growth.md)… | result: PASS | size: standard | tokens: 29110293 (weighted 5883918)
+- run_20261120_215525 | 2026-11-20 | task: Implement Phase 3 of docs/backlog_want-list.md (growth 5.3… | result: PASS | size: standard | tokens: 14691475 (weighted 3447065)
+- run_20261120_211112 | 2026-11-20 | task: Implement Phase 2 of docs/backlog_want-list.md (growth 5.3… | result: PASS | size: standard | tokens: 7300764 (weighted 1824424)
+- run_20261119_210926 | 2026-11-20 | task: Implement Phase 1 of docs/backlog_want-list.md (growth 5.1 and… | result: PASS | size: standard | tokens: 14807076 (weighted 4207934)
 - run_20261118_073634 | 2026-11-18 | task: Security patch: upgrade apps/web `next` from 16.4.3 to 16.4.6… | result: PASS | size: standard | tokens: 7440263 (weighted 1862117)
 - run_20261117_063301 | 2026-11-17 | task: Implement docs/design/2026-11-16_landing.md: the signed-out… | result: PASS | size: standard | tokens: 52687094 (weighted 10140861)
 - run_20261115_193432 | 2026-11-15 | task: Step 0.3 of docs/backlog_growth.md: make the Render deploy… | result: PASS | size: standard | tokens: 3865349 (weighted 998663)
