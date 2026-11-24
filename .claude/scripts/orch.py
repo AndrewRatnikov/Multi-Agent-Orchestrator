@@ -27,9 +27,9 @@ Usage:
       Prints the state summary and the last 20 report lines. Changes nothing.
 
 Instructions (one JSON object on stdout; `say` = lines to show the user first):
-  {"action": "spawn", "agent", "model", "stage", "prompt", "result_file", "then"}
-      Spawn the subagent with exactly this prompt (and model, when not null), save its
-      final report verbatim to result_file, run `then`.
+  {"action": "spawn", "agent", "model", "effort", "stage", "prompt", "result_file", "then"}
+      Spawn the subagent with exactly this prompt (and model / effort, when not null), save
+      its final report verbatim to result_file, run `then`.
   {"action": "ask", "id", "question", "options", "answer_file", "then"}
       Ask the user (AskUserQuestion when options are given), save their answer
       verbatim to answer_file, run `then`.
@@ -61,9 +61,14 @@ from datetime import datetime, timezone
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get("ORCH_ROOT") or os.path.dirname(os.path.dirname(SCRIPTS))
 
-STEPS = ["product", "architect", "render-setup", "tester", "test-reviewer", "coder",
+STEPS = ["product", "prd-review", "architect", "render-setup", "tester", "test-reviewer", "coder",
          "sandbox", "verify", "render", "adr"]
 CAP = 2
+# The escalation ladder: the last automatic retry of the Tester or Coder runs on the strongest
+# model at a higher effort; past the cap a person triages instead of a bare stop.
+LAST_TRY_MODEL, LAST_TRY_EFFORT = "opus", "xhigh"
+# Reviewer output contract: at most this many PRD findings go back to the Product agent.
+MAX_FINDINGS = 7
 LONG_SCRIPTS = {"run-tests.sh", "verify.py", "render-capture.mjs", "repo-digest.sh", "commit-code.py"}
 MD_FIELDS = ["run_id", "task", "repo", "original_branch", "target_branch", "step", "status",
              "timestamp", "last_artifact", "pause_reason", "retry_count", "verify_retries",
@@ -74,23 +79,172 @@ INT_FIELDS = {"retry_count", "verify_retries", "render_retries", "render_setup_r
 MANUAL_FIELDS = ("render_config_ref", "size_override", "task")
 FEEDBACK_INLINE_MAX = 12000
 
-AGENTS = {"product": "orch-product", "architect": "orch-architect",
+AGENTS = {"product": "orch-product", "prd-review": "orch-prd-reviewer", "architect": "orch-architect",
           "render-setup": "orch-render-setup", "tester": "orch-tester",
           "test-reviewer": "orch-test-reviewer", "coder": "orch-coder",
           "render-reviewer": "orch-render-reviewer", "adr": "orch-adr-writer"}
 VALID = {"product": ("status", {"DONE", "NEEDS_INPUT"}),
+         "prd-review": ("verdict", {"CLEAR", "AMBIGUOUS", "BLOCKED"}),
          "architect": ("status", {"DONE", "NEEDS_INPUT"}),
          "render-setup": ("status", {"DONE", "NEEDS_INPUT", "BLOCKED"}),
          "tester": ("status", {"DONE"}),
-         "test-reviewer": ("verdict", {"PASS", "FAIL"}),
+         "test-reviewer": ("verdict", {"PASS", "FAIL", "BLOCKED"}),
          "coder": ("status", {"DONE", "CONTRACT_MISMATCH"}),
-         "render-reviewer": ("verdict", {"PASS", "FAIL"}),
+         "render-reviewer": ("verdict", {"PASS", "FAIL", "BLOCKED"}),
          "adr": ("status", {"DONE", "NONE"})}
 
 ESCALATION_NOTE = ("This run was sized small and skipped this review; review the committed "
                    "tests before the retry.")
 VERIFY_TESTER_NOTE = ("This pass only fixes lint/type errors from Verify; confirm no assertion "
                       "was weakened, removed or loosened.")
+
+# ── escalation ladder: triage at the retry cap ────────────────────────────────
+
+AGENT_NAMES = {"tester": "Tester", "coder": "Coder"}
+TRIAGE_FAILURE_MAX = 2500
+T_MORE = "One more {} attempt (type a hint if you have one)"
+T_TESTS = "The tests are wrong: send them back to the Tester"
+T_CRITERION = "The acceptance criterion is wrong: stop so I can fix the PRD"
+T_PLAN = "The plan or contract is wrong: stop for the Architect"
+T_STOP = "Stop here"
+TRIAGE_HELP = {
+    "coder": ("Which is wrong? The code (one more Coder attempt, with your hint), the tests (they assert "
+              "something the PRD doesn't ask for: back to the Tester, then a test review), or the acceptance "
+              "criterion itself (stop; you fix prd.md and resume from the Architect). Tests are never weakened "
+              "to get a pass."),
+    "tester": ("Which is wrong? The tests (one more Tester attempt, with your hint) or the plan / Interface "
+               "Contract they are written against (stop; resume from the Architect)."),
+}
+TRIAGE_TESTS_NOTE = ("A person triaged the Coder's repeated failures and decided the tests are wrong (see FEEDBACK in the "
+                     "Tester's prompt and report.md). Check that the changed tests now assert what the PRD asks and that "
+                     "no assertion was weakened just to let the current code pass.")
+
+
+def triage_options(stage):
+    if stage == "coder":
+        return [T_MORE.format("Coder"), T_TESTS, T_CRITERION, T_STOP]
+    return [T_MORE.format("Tester"), T_PLAN, T_STOP]
+
+
+def triage_choice(stage, text):
+    """(choice, hint) from a triage answer: choice is more / tests / criterion / plan / stop. The text after
+    an option's label is the hint; an answer that matches no option is all hint, for one more attempt."""
+    t = text.strip()
+    low = t.lower()
+    keys = {T_MORE.format(AGENT_NAMES[stage]): "more", T_TESTS: "tests", T_CRITERION: "criterion",
+            T_PLAN: "plan", T_STOP: "stop"}
+    for label in triage_options(stage):
+        for head in (label, label.split(" (")[0], label.split(":")[0]):
+            if low.startswith(head.lower()):
+                return keys[label], t[len(head):].strip(" \t\n:;,.-—–")
+    if re.match(r"^(stop|cancel|abort)\b", low):
+        return "stop", ""
+    return "more", t
+
+
+# ── reviewer output contract: cite or drop, BLOCKED ───────────────────────────
+
+QUOTE_RE = re.compile(r'"([^"\n]+)"|“([^”\n]+)”')
+PATHLIKE_RE = re.compile(r"[\w@.\-/\[\]]+\.[A-Za-z]{1,5}\b")
+CRITERION_RE = re.compile(r"\b(?:criteri(?:on|a)|AC)[\s#-]*(\d+)", re.I)
+PNG_RE = re.compile(r"[\w@.\-/]+\.png\b")
+
+
+def _plain(text):
+    """Lower-case, markdown emphasis and line breaks removed: what a verbatim quote is compared on."""
+    return re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text or "")).strip().lower()
+
+
+def quotes_source(finding, source):
+    """True when the finding quotes 3+ consecutive words that appear verbatim in `source`."""
+    src = _plain(source)
+    for m in QUOTE_RE.finditer(finding):
+        q = _plain(m.group(1) or m.group(2)).strip(" .,;:")
+        if len(q.split()) >= 3 and q in src:
+            return True
+    return False
+
+
+def prd_criteria_count(prd):
+    m = re.search(r"^## Acceptance criteria\s*$(.*?)(?=^## |\Z)", prd, re.S | re.M)
+    return len(re.findall(r"^\s*\d+[.)]\s", m.group(1), re.M)) if m else 0
+
+
+def cites_test(r, finding, n_criteria):
+    """A test-review failure is cited when it names a test file that exists (in the run's tests/ or the repo)
+    or an acceptance criterion by a number the PRD has."""
+    for tok in PATHLIKE_RE.findall(finding):
+        if os.path.isabs(tok) and os.path.isfile(tok):
+            return True
+        tok = tok.lstrip("./")
+        if tok and (is_tester_file(r, tok) or any(os.path.isfile(os.path.join(base, tok))
+                                                  for base in (r.repo, ROOT, r.dir))):
+            return True
+    for m in CRITERION_RE.finditer(finding):
+        n = int(m.group(1))
+        if n >= 1 and (n_criteria == 0 or n <= n_criteria):
+            return True
+    return False
+
+
+def cites_screenshot(r, finding):
+    """A BLOCKING render finding is cited when it names a screenshot that exists under the run's render/."""
+    shots = None
+    for tok in PNG_RE.findall(finding):
+        if any(os.path.isfile(os.path.join(base, tok)) for base in (ROOT, r.dir, r.path("render"))):
+            return True
+        if shots is None:
+            base = r.path("render")
+            shots = [os.path.relpath(os.path.join(d, n), base).replace(os.sep, "/")
+                     for d, _, names in os.walk(base) for n in names]
+        if any(s == tok or s.endswith("/" + tok.lstrip("./")) for s in shots):
+            return True
+    return False
+
+
+def drop_uncited(r, stage, items, cited):
+    """Split findings into (cited, uncited) and record the uncited ones as dropped."""
+    good = [i for i in items if cited(i)]
+    bad = [i for i in items if not cited(i)]
+    if bad:
+        r.report("[{}] dropped {} finding(s) that cite nothing the orchestrator could check:\n{}".format(
+            stage, len(bad), "\n".join("- " + b for b in bad)))
+    return good, bad
+
+
+CITE_RETRY_NOTE = {
+    "prd-review": ("CITATION_RETRY: your AMBIGUOUS verdict was set aside because none of its findings quotes prd.md "
+                   "verbatim (3-15 consecutive words, in double quotes, exactly as they appear in the file). Uncited "
+                   "findings:\n{bad}\nReview prd.md again. Quote the exact text each finding is about, or drop it."),
+    "test-reviewer": ("CITATION_RETRY: your FAIL verdict was set aside because none of its failures names a test file "
+                      "that exists under runs/{id}/tests/ or a PRD acceptance criterion by number (\"criterion 3\"). "
+                      "Uncited failures:\n{bad}\nReview again. Every failure names the file and test it is about (or "
+                      "the criterion that has no test), or is dropped."),
+    "render-reviewer": ("CITATION_RETRY: your FAIL verdict was set aside because none of its BLOCKING findings names a "
+                        "screenshot that exists under runs/{id}/render/. Uncited findings:\n{bad}\nReview again. Every "
+                        "BLOCKING finding cites the screenshot path it is visible in, or is a NOTE."),
+}
+
+
+def cite_retry(r, stage, bad):
+    """Ask the reviewer once more when dropping its uncited findings would flip its verdict. Returns the
+    spawn, or None once this review has already had its retry."""
+    used = r.ctx.setdefault("cite_retry", {})
+    if used.get(stage):
+        return None
+    used[stage] = True
+    r.report("[{}] every finding is uncited: asking the reviewer once more".format(stage))
+    note = CITE_RETRY_NOTE[stage].format(bad="\n".join("- " + b for b in bad), id=r.id)
+    return r.spawn(stage, note=note)
+
+
+def reviewer_blocked(r, stage, res):
+    why = as_text(res.get("blocked_reason")).strip() or "no reason given"
+    r.ctx.get("cite_retry", {}).pop(stage, None)
+    r.report("[{}] BLOCKED — {}".format(stage, why))
+    return r.stop("The {} couldn't do its review: {}\nReviewers read their inputs themselves and don't guess. Fix the "
+                  "cause, then `/resume-orchestration {} --from {}`.".format(AGENTS[stage], why, r.id, stage_step(stage)),
+                  "failed", "reviewer-blocked")
 
 
 class OrchError(Exception):
@@ -349,6 +503,22 @@ def as_list(v):
     return items
 
 
+def spawn_prompt(agent, run_id, repo, task, answers=None, feedback=None, note=None, extra=None):
+    """The prompt every subagent is started with. evals/run.py uses it too, so an eval starts an agent
+    exactly the way the pipeline does."""
+    lines = ["ORCHESTRATOR_ROOT: " + ROOT, "RUN_ID: " + run_id, "STAGE: " + agent, "REPO: " + repo, "TASK: " + task]
+    if answers:
+        lines.append("ANSWERS: " + answers)
+    if feedback:
+        lines.append("FEEDBACK: " + feedback)
+    if note:
+        lines.append("NOTE: " + note)
+    for k, v in (extra or []):
+        lines.append("{}: {}".format(k, v))
+    lines.append("Follow your agent instructions. Finish with the RESULT block.")
+    return "\n".join(lines)
+
+
 # ── the run ───────────────────────────────────────────────────────────────────
 
 class Run:
@@ -469,25 +639,16 @@ class Run:
         self.st["pending"] = inst
         return inst
 
-    def spawn(self, stage, feedback=None, note=None, answers=None, extra=None, model=None):
+    def spawn(self, stage, feedback=None, note=None, answers=None, extra=None, model=None, effort=None):
         n = self.ctx.setdefault("spawns", {}).get(stage, 0) + 1
         self.ctx["spawns"][stage] = n
         agent = AGENTS[stage]
-        lines = ["ORCHESTRATOR_ROOT: " + ROOT, "RUN_ID: " + self.id, "STAGE: " + agent,
-                 "REPO: " + self.repo, "TASK: " + self.st["task"]]
-        if answers:
-            lines.append("ANSWERS: " + answers)
-        if feedback:
-            lines.append("FEEDBACK: " + self._inline(feedback, stage, n))
-        if note:
-            lines.append("NOTE: " + note)
-        for k, v in (extra or []):
-            lines.append("{}: {}".format(k, v))
-        lines.append("Follow your agent instructions. Finish with the RESULT block.")
+        prompt = spawn_prompt(agent, self.id, self.repo, self.st["task"], answers=answers,
+                              feedback=self._inline(feedback, stage, n) if feedback else None, note=note, extra=extra)
         rf = self.rel("results", "{}-{}.md".format(stage, n))
         self.st["phase"] = stage + ".wait"
-        return self._pend({"action": "spawn", "agent": agent, "model": model, "stage": stage,
-                           "prompt": "\n".join(lines), "result_file": rf,
+        return self._pend({"action": "spawn", "agent": agent, "model": model, "effort": effort, "stage": stage,
+                           "prompt": prompt, "result_file": rf,
                            "then": self.cmd("result", self.id, stage, rf)})
 
     def _inline(self, text, stage, n):
@@ -621,6 +782,20 @@ class Run:
     def model_for(self, stage):
         return "sonnet" if self.small() and stage in ("tester", "coder") else None
 
+    def last_try(self, stage, attempt):
+        """Escalation ladder, rung 2: the last automatic attempt (attempt == CAP) runs on the strongest
+        model at a higher effort. The flag is taken by the stage's next spawn (`spawn_opts`)."""
+        if attempt >= CAP:
+            self.ctx.setdefault("boost", {})[stage] = True
+
+    def spawn_opts(self, stage):
+        """(model, effort) for a Tester/Coder spawn."""
+        if self.ctx.get("boost", {}).pop(stage, False):
+            self.report("[ladder] {}: last automatic attempt runs on {} at effort {}".format(
+                stage, LAST_TRY_MODEL, LAST_TRY_EFFORT))
+            return LAST_TRY_MODEL, LAST_TRY_EFFORT
+        return self.model_for(stage), None
+
     def escalate(self, stage, why):
         """Small run -> standard on the first trouble. Returns True when the skipped
         test review must run before the retry."""
@@ -668,6 +843,23 @@ class Run:
                          .format(what, self.id, extra, self.id, step, self.st["target_branch"], self.repo),
                          "failed", "retry-cap")
 
+    def triage(self, stage, what, feedback, fix_reason=None):
+        """Escalation ladder, rung 3: the retry cap is reached. Instead of a bare stop, show a person the last
+        failure and ask what is actually wrong: the code (one more attempt, with their hint), the tests,
+        the acceptance criterion or the plan. Unattended runs stop as before."""
+        extra = " for the feedback" if stage == "tester" else " for the failure output"
+        if self.st.get("unattended"):
+            return self.cap_stop(what, stage, extra)
+        self.ctx["triage"] = {"stage": stage, "what": what, "feedback": feedback, "fix_reason": fix_reason}
+        self.report("[ladder] {} retry cap reached (2/2): asking a person to triage".format(what))
+        last = (feedback or "").strip() or "(no failure text recorded; see report.md)"
+        if len(last) > TRIAGE_FAILURE_MAX:
+            last = last[:TRIAGE_FAILURE_MAX] + "\n[... truncated; the full text is in runs/{}/report.md]".format(self.id)
+        q = ("{} retry cap reached (2/2): the {} didn't get past it in two automatic retries.\n\nLast failure:\n\n"
+             "{}\n\n{}\n\nAnything you type besides one of the options is passed on as a hint for one more attempt."
+             .format(what, AGENT_NAMES[stage], last, TRIAGE_HELP[stage]))
+        return self.ask("triage:" + stage, q, triage_options(stage), pause="awaiting_triage")
+
     def to_tester(self, report_block, feedback, cap_what, say_fmt, escalate_why=None):
         if escalate_why:
             self.escalate("tester", escalate_why)
@@ -677,7 +869,8 @@ class Run:
             self.report(report_block.replace("{retry}", "retry {}/2".format(rc + 1) if rc < CAP else "retry cap reached"))
         self.ctx.setdefault("last_feedback", {})["tester"] = feedback
         if rc >= CAP:
-            return self.cap_stop(cap_what, "tester", " for the feedback")
+            return self.triage("tester", cap_what, feedback)
+        self.last_try("tester", rc + 1)
         self.apply({"rc": rc + 1, "archive": [("tests", "tests_v{}".format(rc + 1))],
                     "feedback": {"tester": feedback}, "say": say_fmt.format(n=rc + 1), "phase": "tester"})
         return None
@@ -689,7 +882,8 @@ class Run:
             self.report(report_block.replace("{retry}", "retry {}/2".format(rc + 1) if rc < CAP else "retry cap reached"))
         self.ctx.setdefault("last_feedback", {})["coder"] = feedback
         if rc >= CAP:
-            return self.cap_stop(cap_what, "coder", " for the failure output")
+            return self.triage("coder", cap_what, feedback, fix_reason)
+        self.last_try("coder", rc + 1)
         ctx = {"fix_reason": fix_reason, "render_pass": False}
         ctx.update(extra_ctx or {})
         self.route({"rc": rc + 1, "archive": [("code", "code_v{}".format(rc + 1))],
@@ -741,7 +935,8 @@ def import_state_md(md, run_id):
 
 def ph_product(r):
     r.set(step="product", status="running")
-    return r.spawn("product", answers=r.ctx.get("answers", {}).get("product"))
+    return r.spawn("product", feedback=r.take_feedback("product"),
+                   answers=r.ctx.get("answers", {}).get("product"))
 
 
 def needs_input(r, stage, res):
@@ -779,9 +974,68 @@ def res_product(r, res):
                       "failed", "missing-artifact")
     r.report("[product] DONE — {}".format(res.get("summary", "")))
     r.ctx["prd_summary"] = as_text(res.get("summary"))
-    r.set(step="architect", last_artifact=r.rel("prd.md"))
+    nxt = "architect" if r.ctx.get("prd_reviewed") else "prd-review"
+    r.set(step=nxt, last_artifact=r.rel("prd.md"))
     r.say("PRD written: {}".format(res.get("summary", "")))
-    r.st["phase"] = "architect"
+    r.st["phase"] = nxt
+
+
+# ── Stage 1b: PRD review (ambiguity hunt) ─────────────────────────────────────
+
+PRD_FEEDBACK = (
+    "The PRD reviewer, a separate agent that read prd.md cold, found places where two competent engineers "
+    "would build different things:\n{findings}\n\n"
+    "For each finding: if a sensible default exists and the choice isn't one only the user can make, pick one "
+    "reading, rewrite the PRD text so only that reading remains, and record the choice under ## Assumptions. "
+    "If the choice is genuinely the user's (a business rule, money, privacy, what they meant), return "
+    "NEEDS_INPUT with one question per such finding. If a finding is wrong because the PRD already settles it, "
+    "leave that text as it is and say why in your final message. Don't add scope while you're at it.")
+PRD_FEEDBACK_UNATTENDED = ("\n\nThis run is unattended: no one can answer questions. Settle every finding with a "
+                           "stated assumption; don't return NEEDS_INPUT.")
+
+
+def ph_prd_review(r):
+    r.set(step="prd-review", status="running")
+    if r.st.get("size_override") == "small":
+        r.report("[prd-review] SKIPPED — run forced small (--size small)")
+        r.ctx["prd_reviewed"] = True
+        r.set(step="architect")
+        r.st["phase"] = "architect"
+        return None
+    return r.spawn("prd-review")
+
+
+def res_prd_review(r, res):
+    if res["verdict"] == "BLOCKED":
+        return reviewer_blocked(r, "prd-review", res)
+    items = as_list(res.get("findings")) if res["verdict"] == "AMBIGUOUS" else []
+    prd = read(r.path("prd.md"))
+    good, bad = drop_uncited(r, "prd-review", items, lambda f: quotes_source(f, prd))
+    if items and not good:
+        inst = cite_retry(r, "prd-review", bad)
+        if inst:
+            return inst
+    r.ctx.get("cite_retry", {}).pop("prd-review", None)
+    r.ctx["prd_reviewed"] = True
+    if len(good) > MAX_FINDINGS:
+        r.report("[prd-review] kept the first {} of {} findings".format(MAX_FINDINGS, len(good)))
+        good = good[:MAX_FINDINGS]
+    if not good:
+        r.report("[prd-review] CLEAR" + (" (no cited findings left)" if items else ""))
+        r.set(step="architect")
+        r.st["phase"] = "architect"
+        return None
+    bullets = "\n".join("- " + g for g in good)
+    write(r.path("prd-review.md"), "# PRD review: {}\n\n{}\n".format(r.id, bullets))
+    r.report("[prd-review] AMBIGUOUS — {} finding(s), back to the Product agent\n{}".format(len(good), bullets))
+    r.archive("prd.md", "prd_before_review.md")
+    fb = PRD_FEEDBACK.format(findings=bullets) + (PRD_FEEDBACK_UNATTENDED if r.st.get("unattended") else "")
+    r.ctx.setdefault("feedback", {})["product"] = fb
+    r.say("The PRD reviewer found {} ambiguit{} (runs/{}/prd-review.md). Sending them to the Product agent...".format(
+        len(good), "y" if len(good) == 1 else "ies", r.id))
+    r.set(step="product")
+    r.st["phase"] = "product"
+    return None
 
 
 def ph_architect(r):
@@ -1116,7 +1370,8 @@ def ph_tester(r):
         r.set(step="test-reviewer", last_artifact=r.rel("tests") + "/")
         r.st["phase"] = "tester.paths"
         return None
-    return r.spawn("tester", feedback=r.take_feedback("tester"), model=r.model_for("tester"))
+    model, effort = r.spawn_opts("tester")
+    return r.spawn("tester", feedback=r.take_feedback("tester"), model=model, effort=effort)
 
 
 def res_tester(r, res):
@@ -1266,6 +1521,24 @@ def ph_4b(r):
 
 def res_test_reviewer(r, res):
     verdict = res["verdict"]
+    if verdict == "BLOCKED":
+        return reviewer_blocked(r, "test-reviewer", res)
+    fails = []
+    if verdict == "FAIL":
+        n = prd_criteria_count(read(r.path("prd.md")))
+        items = as_list(res.get("failures"))
+        fails, bad = drop_uncited(r, "test-reviewer", items, lambda f: cites_test(r, f, n))
+        if not fails:
+            inst = cite_retry(r, "test-reviewer", bad or ["(no failures listed)"])
+            if inst:
+                return inst
+            # This is the gate that keeps gamed tests away from the Coder: an unexplained FAIL is not a PASS.
+            r.report("[test-reviewer] FAIL with no cited failure after a retry\n{}".format(res["_raw"]))
+            return r.stop("The test-reviewer rejected the tests twice without naming a test file or acceptance "
+                          "criterion the orchestrator could check (see report.md). A person should look at "
+                          "runs/{}/tests/, then `/resume-orchestration {} --from test-reviewer` (review again) or "
+                          "`--from tester`.".format(r.id, r.id), "failed", "result-malformed")
+    r.ctx.get("cite_retry", {}).pop("test-reviewer", None)
     r.call("review-delta.py", r.id, r.repo, "mark", verdict)
     r.report("[test-reviewer] {}\n{}".format(verdict, res["_raw"]))
     r.ctx["last_review_verdict"] = verdict
@@ -1274,7 +1547,6 @@ def res_test_reviewer(r, res):
         if gaps:
             r.say("Test-reviewer advisory contract gaps:\n" + "\n".join("- " + g for g in gaps))
         return after_review_pass(r)
-    fails = as_list(res.get("failures"))
     r.ctx["last_review_failures"] = fails
     r.ctx.pop("deferred", None)
     fb = ("The previous test attempt was rejected by the test-reviewer with this feedback: {}. Fix the issues "
@@ -1344,6 +1616,47 @@ def mismatch_fix_in(res):
     return "contract"
 
 
+def ans_triage(r, qid, text):
+    """The person's call at the retry cap (escalation ladder, rung 3)."""
+    stage = qid.split(":", 1)[1]
+    tri = r.ctx.pop("triage", None) or {"stage": stage, "what": AGENT_NAMES[stage], "feedback": "", "fix_reason": None}
+    choice, hint = triage_choice(stage, text)
+    r.report("[triage] {}: {}{}".format(stage, choice, " — hint: " + hint if hint else ""))
+    if choice == "more":
+        fb = (tri["feedback"] or "").rstrip()
+        if hint:
+            fb += "\n\nA person looked at this failure and adds:\n" + hint
+        r.st["retry_count"] = CAP - 1          # one more attempt, the last one again: boosted, then triage again
+        r.set(step=stage)
+        say = "One more {} attempt, as asked{}...".format(AGENT_NAMES[stage], " (with your hint)" if hint else "")
+        if stage == "tester":
+            return r.to_tester(None, fb, tri["what"], say)
+        return r.to_coder(None, fb, tri["fix_reason"] or "address review findings", tri["what"], say, None)
+    if choice == "tests" and stage == "coder":
+        fb = ("A person triaged the Coder's repeated failures and decided the tests are wrong, not the code.{}\n\n"
+              "The last failure:\n{}\n\nFix the tests so they assert what prd.md asks. Don't weaken an assertion just "
+              "so the current code passes; if the PRD really asks for what the test checks, keep it and say so."
+              .format(" Their note: " + hint if hint else "", tri["feedback"]))
+        r.ctx["review_skipped"] = False
+        r.ctx["review_note"] = TRIAGE_TESTS_NOTE
+        r.ctx.setdefault("last_feedback", {})["tester"] = fb
+        r.set(step="tester")
+        r.apply({"rc": 1, "archive": [("tests", "tests_triage")], "feedback": {"tester": fb}, "phase": "tester",
+                 "say": "Sending the tests back to the Tester, then a test review, then the Coder..."})
+        return None
+    if choice == "criterion":
+        return r.stop("Stopped so you can fix the acceptance criterion. Edit runs/{id}/prd.md{note}, then "
+                      "`/resume-orchestration {id} --from architect` (the plan, tests and code follow from the PRD). "
+                      "Partial work is committed on `{b}` in {repo}."
+                      .format(id=r.id, note=" (your note: {})".format(hint) if hint else "",
+                              b=r.st["target_branch"], repo=r.repo), "paused", "criterion-disputed")
+    if choice == "plan":
+        return r.stop("Stopped for the Architect: the plan or Interface Contract is wrong{}. Fix runs/{id}/plan.md and "
+                      "contract.json, or let the Architect redo them: `/resume-orchestration {id} --from architect`."
+                      .format(" ({})".format(hint) if hint else "", id=r.id), "paused", "contract-disputed")
+    return r.cap_stop(tri["what"], stage, " for the feedback" if stage == "tester" else " for the failure output")
+
+
 MISMATCH_TESTER_NOTE = ("The Coder reported that these tests contradict the plan (CONTRACT_MISMATCH, see FEEDBACK "
                         "in the Tester's prompt and report.md). Check that the changed tests now follow plan.md and "
                         "still assert what the PRD asks.")
@@ -1369,7 +1682,8 @@ def ph_coder(r):
         return None
     r.call("coder-slices.py", "set", r.id, "0")
     r.ctx["coder_mode"] = "single"
-    return r.spawn("coder", feedback=r.take_feedback("coder"), model=r.model_for("coder"))
+    model, effort = r.spawn_opts("coder")
+    return r.spawn("coder", feedback=r.take_feedback("coder"), model=model, effort=effort)
 
 
 def ph_coder_slice(r):
@@ -1737,17 +2051,32 @@ def ans_render_accept(r, qid, text):
 
 
 def res_render_reviewer(r, res):
+    if res["verdict"] == "BLOCKED":
+        return reviewer_blocked(r, "render-reviewer", res)
     if not os.path.exists(r.path("render-review.md")):
         r.report("[render-reviewer] FAILED — render-review.md is missing")
         return r.stop("The render reviewer returned no render-review.md.", "failed", "missing-artifact")
-    r.report("[render-reviewer] {}\n{}".format(res["verdict"], res["_raw"]))
-    r.ctx["render_notes"] = as_list(res.get("notes"))
-    if res["verdict"] == "PASS":
+    notes = as_list(res.get("notes"))
+    blocking = []
+    if res["verdict"] == "FAIL":
+        blocking, bad = drop_uncited(r, "render-reviewer", as_list(res.get("blocking")),
+                                     lambda f: cites_screenshot(r, f))
+        if not blocking:
+            inst = cite_retry(r, "render-reviewer", bad or ["(no blocking findings listed)"])
+            if inst:
+                return inst
+        # Uncited BLOCKING findings stay visible in the summary as notes; false alarms cost real Coder retries.
+        notes += ["(uncited, was BLOCKING) " + b for b in bad]
+    r.ctx.get("cite_retry", {}).pop("render-reviewer", None)
+    verdict = "FAIL" if blocking else "PASS"
+    r.report("[render-reviewer] {}{}\n{}".format(
+        verdict, " (no cited BLOCKING finding left)" if verdict != res["verdict"] else "", res["_raw"]))
+    r.ctx["render_notes"] = notes
+    if verdict == "PASS":
         r.ctx["render_outcome"] = "PASS"
         r.set(step="adr")
         r.st["phase"] = "adr"
         return None
-    blocking = as_list(res.get("blocking"))
     rr = r.st["render_retries"]
     if rr >= CAP:
         return r.stop("Render-review retry cap reached (2/2). Human intervention required.\n\nBlocking:\n{}\n\n"
@@ -1756,6 +2085,7 @@ def res_render_reviewer(r, res):
                       .format("\n".join("- " + b for b in blocking), r.id, r.id, r.id), "failed", "retry-cap")
     rr += 1
     r.st["render_retries"] = rr
+    r.last_try("coder", rr)
     needs = r.escalate("render", "the render review sent findings to the Coder")
     fb = ("{}\n\nFull review with screenshots: runs/{id}/render-review.md and runs/{id}/render/. These are "
           "problems in the rendered page, not test failures. Fix only what is listed; don't change what any test "
@@ -2127,7 +2457,7 @@ def add_run_history(r, line):
 # ── dispatch tables ───────────────────────────────────────────────────────────
 
 PHASES = {
-    "product": ph_product, "architect": ph_architect, "architect.check": ph_architect_check,
+    "product": ph_product, "prd-review": ph_prd_review, "architect": ph_architect, "architect.check": ph_architect_check,
     "sizing": ph_sizing, "render-setup": ph_render_setup, "render-setup.recheck": ph_render_recheck,
     "rs.start": ph_rs_start, "rs.agent": ph_rs_agent, "rs.apply": ph_rs_apply, "rs.smoke": ph_rs_smoke,
     "tester.enter": ph_tester_enter, "tester": ph_tester, "tester.paths": ph_tester_paths,
@@ -2136,11 +2466,12 @@ PHASES = {
     "5b": ph_5b, "sandbox": ph_sandbox, "verify": ph_verify, "render": ph_render,
     "adr": ph_adr, "adr.retry": ph_adr_retry, "done": ph_done, "pr": ph_pr,
 }
-RESULTS = {"product": res_product, "architect": res_architect, "render-setup": res_render_setup,
+RESULTS = {"product": res_product, "prd-review": res_prd_review, "architect": res_architect, "render-setup": res_render_setup,
            "tester": res_tester, "test-reviewer": res_test_reviewer, "coder": res_coder,
            "render-reviewer": res_render_reviewer, "adr": res_adr}
 ANSWERS = {"questions": ans_questions, "render-decision": ans_render_decision, "rs-blocked": ans_rs_blocked,
-           "rs-branch": ans_rs_branch, "verify-accept": ans_verify_accept, "render-accept": ans_render_accept}
+           "rs-branch": ans_rs_branch, "verify-accept": ans_verify_accept, "render-accept": ans_render_accept,
+           "triage": ans_triage}
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -2283,7 +2614,7 @@ RESUME_ARCHIVE = {
     "render": [("render-review.md", "render-review_before_resume_{ts}.md", True)],
     "adr": [("adr", "adr_before_resume_{ts}", True)],
 }
-RESUME_PHASE = {"product": "product", "architect": "architect", "render-setup": "render-setup",
+RESUME_PHASE = {"product": "product", "prd-review": "prd-review", "architect": "architect", "render-setup": "render-setup",
                 "tester": "tester.enter", "test-reviewer": "4a", "coder": "coder", "sandbox": "sandbox",
                 "verify": "verify", "render": "render", "adr": "adr"}
 
@@ -2338,8 +2669,11 @@ def cmd_resume(a):
     r.set(step=frm, status="running", pause_reason="")
     st["pending"] = None
     ctx = r.ctx
-    for k in ("deferred", "coder_mode", "timeout_review", "verify_coder", "lockfile_tried"):
+    for k in ("deferred", "coder_mode", "timeout_review", "verify_coder", "lockfile_tried", "boost", "triage",
+              "cite_retry"):
         ctx.pop(k, None)
+    if frm in ("product", "prd-review"):
+        ctx.pop("prd_reviewed", None)   # a new or re-reviewed PRD gets its ambiguity hunt
     r.report("---\n[RESUMED] step: {} at {}".format(frm, now_iso()))
     st["phase"] = RESUME_PHASE[frm]
     trouble = prev_status == "failed" or (prev_status == "paused" and prev_reason not in

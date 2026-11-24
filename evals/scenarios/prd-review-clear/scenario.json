@@ -1,0 +1,16 @@
+{
+  "about": "PRD reviewer doesn't invent ambiguity in a precise PRD (false-positive guard)",
+  "agent": "orch-prd-reviewer",
+  "repo": "repo-budget",
+  "task": "Add a monthly total to the budget module: sum one month's expenses and format cents as euros.",
+  "expect": {
+    "verdict": [
+      "CLEAR",
+      "AMBIGUOUS"
+    ]
+  },
+  "max_items": {
+    "findings": 1
+  },
+  "cited": true
+}

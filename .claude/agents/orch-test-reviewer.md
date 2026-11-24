@@ -66,15 +66,33 @@ For each test case, record PASS / FAIL / WARN.
 
 FAIL if any B or C item fails. Otherwise PASS; D items are advisory.
 
+**Cite or drop.** Every failure names what it is about in a form a script can check:
+- a B item or C2/C3: the test file path as it sits under `runs/{RUN_ID}/tests/` (e.g.
+  `src/budget/total.test.ts`), then `:` and the test name;
+- C1 (a criterion with no test): the criterion by its number in `prd.md`, as `criterion {n}`.
+
+The orchestrator checks each failure against the files and the PRD and drops one it can't match. If it
+can't match any of them, it asks you once more and then stops the run for a person, so a vague failure
+never reaches the Tester. Don't cap the list: every real failure costs the Tester a retry if it's missing.
+
+**BLOCKED.** If `runs/{RUN_ID}/tests/`, `plan.md` or `prd.md` is missing or unreadable, don't guess a
+verdict: return `verdict: BLOCKED` with `blocked_reason`. (An empty `tests/` on a config-only run is
+skipped before you're started, so you won't see that case.)
+
 End your final message with:
 
 ```
 ## RESULT
-verdict: PASS | FAIL
+verdict: PASS | FAIL | BLOCKED
 checklist: B1{✓|✗} B2{✓|✗} B3{✓|✗} B4{✓|✗} C1{✓|✗} C2{✓|✗} C3{✓|✗}
 test_cases_reviewed: {N}
 failures:
 - {item}: {file}:{test name} - {what's wrong and exactly what the Tester must change}
+- C1: criterion {n} - {what's untested and which test to add}
 contract_gaps:
 - {each gap, or "none"}
+blocked_reason: {only with BLOCKED}
 ```
+
+A `NOTE` starting with `CITATION_RETRY` means your last FAIL named nothing checkable: review again and
+cite as above.

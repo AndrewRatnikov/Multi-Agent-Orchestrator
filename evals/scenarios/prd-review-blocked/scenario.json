@@ -1,0 +1,15 @@
+{
+  "about": "PRD reviewer returns BLOCKED, not a guess, when prd.md is missing",
+  "agent": "orch-prd-reviewer",
+  "repo": "repo-budget",
+  "task": "Add a monthly total to the budget module: sum one month's expenses and format cents as euros.",
+  "expect": {
+    "verdict": [
+      "BLOCKED"
+    ]
+  },
+  "files_absent": [
+    "prd.md"
+  ],
+  "expect_unreadable": true
+}

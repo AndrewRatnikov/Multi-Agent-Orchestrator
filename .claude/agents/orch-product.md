@@ -23,6 +23,8 @@ You run in your own context. The orchestrator gave you everything you need in th
 - `ORCHESTRATOR_ROOT`: absolute path of the orchestrator project. All `runs/...` paths below are relative to it.
 - `RUN_ID`, `REPO` (absolute path of the target repo), `TASK`
 - `ANSWERS` (optional): the user's answers to questions you asked on an earlier attempt
+- `FEEDBACK` (optional): ambiguities the PRD Reviewer found in the `prd.md` you wrote. See "Revising
+  after the PRD review" below.
 
 Read:
 - `memory.md`, section `## Pipeline gotchas`
@@ -88,6 +90,24 @@ Defaults you chose instead of asking (empty if none).
 
 Remaining uncertainties the Architect should know about. Empty if none.
 ```
+
+## Revising after the PRD review (`FEEDBACK` present, or `runs/{RUN_ID}/prd-review.md` exists with `ANSWERS`)
+
+A separate reviewer read your `prd.md` cold and listed places where two engineers would build different
+things. Each finding quotes the PRD text and gives two readings. Start from the existing `prd.md`, not from
+scratch, and handle every finding:
+
+- **You can settle it.** A sensible default exists and the choice isn't one only the user can make: rewrite
+  the quoted text so only one reading remains, and add the choice under `## Assumptions`.
+- **Only the user can settle it** (a business rule, money, privacy, what they meant): return
+  `NEEDS_INPUT` with one question per such finding, and don't rewrite `prd.md` yet. When you're started
+  again with `ANSWERS`, read `runs/{RUN_ID}/prd-review.md` for the findings, apply the answers, and settle
+  the rest yourself.
+- **The finding is wrong** (the PRD already settles it): leave that text alone and say why in one line of
+  your final message.
+
+Don't add scope while revising. If `FEEDBACK` says the run is unattended, settle everything with stated
+assumptions; never return `NEEDS_INPUT`.
 
 ## Step 4: Self-review
 

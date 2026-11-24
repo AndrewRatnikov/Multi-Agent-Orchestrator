@@ -59,7 +59,8 @@ Every `orch.py` call prints one JSON instruction. First show the user its `say` 
 
 - **`spawn`**: spawn a subagent with the Agent tool. Set `subagent_type` to the **value of the
   instruction's `agent` field** (e.g. `orch-product`; never the literal word "agent"), and pass the `prompt`
-  exactly as given (don't add to it or paste files into it), and `model` when it isn't null. Wait
+  exactly as given (don't add to it or paste files into it), `model` when it isn't null, and `effort`
+  when it isn't null (the last automatic retry of the Tester or Coder runs at a higher effort). Wait
   for its final report. Write that report, verbatim and complete, to `result_file` (relative to the
   orchestrator root), then run `then`.
 - **`ask`**: ask the user `question`. With `options`, use AskUserQuestion with those options
@@ -90,6 +91,7 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 |---|---|
 | 0 Setup | clean-tree check, Docker check when Verify has database steps, pull-request check (remote, `gh` signed in with write access, a dry-run push) unless `--no-pr`, branch, run folder, `state`, `report.md`, repo digest |
 | 1 Product | `orch-product` → prd.md; `NEEDS_INPUT` pauses with an `ask` |
+| 1b PRD review | `orch-prd-reviewer` (read-only, fresh context) hunts for places where two engineers would build different things. `CLEAR` → Architect; `AMBIGUOUS` → its cited findings (≤ 7) go back to Product once, which settles each with a stated assumption or asks the user; `BLOCKED` stops. Skipped with `--size small` |
 | 2 Architect | `orch-architect` → plan.md + contract.json; `check-contract validate` (UI files need `render_targets` or a `render_targets_none_reason`), `check-adr plan` (2 retries); `size-run.py` |
 | 2b Render config | `render-config.py check` (`no-targets:` = UI run the Architect opted out of, reason shown); may ask to set up render config (the procedure in `.claude/procedures/render-setup.md`) |
 | 3 Tester | `orch-tester` (not run when the contract has no Tester-owned files); scope check, `check-paths tests`, autofix, `test:` / `fix tests:` commit |
@@ -106,6 +108,20 @@ a usage error (usually a result handed to the wrong stage), exit 3 an internal e
 Retry caps are 2 per counter (`retry_count`, `architect_retries`, `verify_retries`,
 `render_retries`, `render_setup_retries`). A small run escalates to standard on its first
 trouble. Every cap, pause and stop names the `/resume-orchestration` command to continue with.
+
+**Escalation ladder (Tester and Coder).** The last automatic retry runs on Opus at effort `xhigh`
+(the spawn's `model` / `effort`). When the cap is reached, `orch.py` asks the user to triage
+(`ask` with id `triage:coder` or `triage:tester`) instead of stopping: one more attempt (whatever the
+user types besides an option is passed on as a hint), the tests are wrong (back to the Tester, then a
+test review), the acceptance criterion or the plan is wrong (the run stops for a fix and a resume from
+the Architect), or stop. Ask exactly as for any `ask`; never pick an option for the user. Unattended
+runs stop at the cap as before.
+
+**Reviewer output contract.** The PRD reviewer, test-reviewer and render reviewer must cite what each
+finding is about (a verbatim PRD quote, a test file or criterion number, a screenshot path); `orch.py`
+checks it and drops what it can't match. When dropping would flip the verdict, it re-spawns the
+reviewer once with a `CITATION_RETRY` note. A reviewer that can't read its inputs answers `BLOCKED`,
+which stops the run with the reason.
 The transitions are the `ph_*` / `res_*` / `ans_*` handlers in `.claude/scripts/orch.py`; their
 tests are in `.claude/scripts/tests/test_orch.py`.
 

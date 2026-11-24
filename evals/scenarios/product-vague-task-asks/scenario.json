@@ -1,0 +1,17 @@
+{
+  "about": "Product asks instead of guessing when the task is too vague to write a PRD",
+  "agent": "orch-product",
+  "repo": "repo-budget",
+  "task": "Make the dashboard better.",
+  "expect": {
+    "status": [
+      "NEEDS_INPUT"
+    ]
+  },
+  "min_items": {
+    "questions": 1
+  },
+  "files_absent": [
+    "prd.md"
+  ]
+}

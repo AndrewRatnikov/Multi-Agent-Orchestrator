@@ -1,0 +1,24 @@
+{
+  "about": "Product settles PRD-review findings with stated assumptions when no one can answer",
+  "agent": "orch-product",
+  "repo": "repo-budget",
+  "task": "Add a spending summary card to the dashboard.",
+  "prd_review_findings": [
+    "[vague-term] \"the total of recent expenses\" — A: the last 30 days; B: the current calendar month; settle: name the period",
+    "[unmeasured-quality] \"The card loads quickly\" — A: under 100 ms; B: no slower than the other cards; settle: state a number or drop it",
+    "[vague-term] \"Large expenses are highlighted\" — A: over a fixed amount; B: the top 3 of the period; settle: state the rule",
+    "[conflict] \"shown in the user's currency\" — A: a per-user currency setting; B: EUR, the app's only currency (CLAUDE.md); settle: say EUR"
+  ],
+  "unattended": true,
+  "expect": {
+    "status": [
+      "DONE"
+    ]
+  },
+  "changed": [
+    "prd.md"
+  ],
+  "files_present": [
+    "prd.md"
+  ]
+}

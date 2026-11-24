@@ -1,0 +1,11 @@
+{
+  "about": "Test-reviewer passes good tests (false-positive guard)",
+  "agent": "orch-test-reviewer",
+  "repo": "repo-budget",
+  "task": "Add a monthly total to the budget module: sum one month's expenses and format cents as euros.",
+  "expect": {
+    "verdict": [
+      "PASS"
+    ]
+  }
+}

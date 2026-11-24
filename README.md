@@ -12,6 +12,7 @@ The pipeline runs sequentially, with a review gate after each stage. Each LLM st
 
 ```
 Product agent    → prd.md
+PRD reviewer     → gate: where would two engineers build different things? (back to Product once)
 Architect agent  → plan.md + Interface Contract
 Render config    → if the run changes pages and the repo has no render config: ask, and
                    optionally set it up on its own branch (orch-render-setup + smoke test)
@@ -131,6 +132,36 @@ run only the Verify stage on a branch:
 It compares the committed branch with the default branch (or `--base`) and reports the
 same table, failures, pre-existing failures and migration follow-ups as a pipeline run.
 
+Ambiguity is cheapest to fix before anyone builds on it. Right after the Product agent, a
+separate read-only agent, `orch-prd-reviewer`, reads `prd.md` cold and answers one question: where
+would two competent engineers reasonably build different things? (A period that isn't named, a
+quality with no number, a criterion missing its empty or error case, a name with two candidates in
+the repo, a criterion that contradicts the repo's CLAUDE.md.) Each finding must quote the PRD
+verbatim, and `orch.py` drops any whose quote isn't in the file; at most 7 go back to the Product
+agent, once. Product settles each with a stated assumption or, when the choice is really the
+user's, asks. `--size small` skips the review.
+
+Reviewers follow one output contract: **cite or drop**. The PRD reviewer quotes the PRD, the
+test-reviewer names the test file or the criterion number, the render reviewer names the screenshot,
+and `orch.py` checks each citation against the files. Uncited findings are dropped and logged; if
+dropping them would flip the verdict, the reviewer gets one `CITATION_RETRY`. A test review that still
+fails without a citation stops for a person (the gate never passes by default). A reviewer that can't
+read its inputs returns `BLOCKED`, which stops the run with the reason instead of a guessed verdict.
+
+When the Tester or Coder can't get past a gate, the **escalation ladder** applies: the first retry
+gets the failure as feedback, the last automatic retry runs on Opus at effort `xhigh`, and at the cap
+the pipeline asks you what is actually wrong instead of just stopping: the code (one more attempt,
+with your hint), the tests (they assert something the PRD doesn't ask for: back to the Tester and a
+test review), or the acceptance criterion / plan (stop, fix it, resume from the Architect). Tests are
+never weakened to get a pass. Unattended runs stop at the cap as before.
+
+## Agent behaviour evals
+
+`pytest` proves the routing with every agent played by a fake. `python3 evals/run.py` runs the real
+agents on fixtures and checks how they behave: mechanical checks on the RESULT block and files, then a
+read-only judge against a rubric. On demand, not CI (each scenario is a real agent session). See
+[`evals/README.md`](./evals/README.md).
+
 ## Key design decisions
 
 - **Tests before code** — the coder gets an objective, machine-checkable target instead of reviewer vibes
@@ -145,11 +176,12 @@ Full design rationale: [`agent-orchestrator-overview.md`](./agent-orchestrator-o
 
 ```
 .claude/
-  agents/          # orch-product, orch-architect, orch-render-setup, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
+  agents/          # orch-product, orch-prd-reviewer, orch-architect, orch-render-setup, orch-tester, orch-test-reviewer, orch-coder, orch-render-reviewer, orch-adr-writer
   commands/        # /run-orchestration, /resume-orchestration, /verify-branch, /setup-render
   render-tools/    # pinned Playwright for render-capture.mjs (orchestrator side only)
   procedures/      # render-setup.md (used by /setup-render)
   scripts/         # orch.py (the pipeline driver; tests in scripts/tests/), repo-digest.sh, check-contract.sh, check-paths.py, autofix.py, run-tests.sh, sandbox-timeout.py, verify.py, render-capture.mjs, render-config.py, run-usage.py, seed-code.py, coder-slices.py, commit-code.py, regen.py, review-delta.py, guard-writes.sh
+evals/             # agent behaviour evals: run.py, judge-prompt.md, fixtures/, scenarios/
 runs/              # one folder per run, excluded from git
 memory.md          # pipeline-level lessons only
 repo-notes/        # notes for target repos that don't have .claude/rules/ yet

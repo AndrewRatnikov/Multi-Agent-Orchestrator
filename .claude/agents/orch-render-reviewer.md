@@ -91,13 +91,22 @@ Every finding must cite a screenshot path. If there are no findings, say so unde
 
 ```
 ## RESULT
-verdict: PASS | FAIL
+verdict: PASS | FAIL | BLOCKED
 targets_reviewed: {N}
 screenshots_viewed: {N}
 blocking:
 - B1 {target}: {one-line what's wrong and what to change} ({screenshot path})
 notes:
 - N1 {target}: {one line}
+blocked_reason: {only with BLOCKED}
 ```
 
 `verdict: FAIL` if and only if there is at least one BLOCKING finding. List `blocking:` and `notes:` as `none` when empty.
+
+**Cite or drop.** Each `blocking:` line must contain the path of a screenshot that exists under
+`runs/{RUN_ID}/render/` (e.g. `runs/{RUN_ID}/render/after/home.desktop.png`). The orchestrator checks the
+path; a BLOCKING line without one is demoted to a note, and if none is left it asks you once more
+(`NOTE` starting with `CITATION_RETRY`) before treating the review as PASS with notes.
+
+**BLOCKED.** If `render/summary.json` or the screenshots are missing or unreadable, don't review from
+memory: return `verdict: BLOCKED` with `blocked_reason`. Don't write `render-review.md` in that case.

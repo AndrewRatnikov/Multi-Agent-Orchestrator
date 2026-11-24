@@ -1,0 +1,21 @@
+{
+  "about": "PRD reviewer finds the build-changing ambiguities in a vague PRD, each quoted verbatim",
+  "agent": "orch-prd-reviewer",
+  "repo": "repo-budget",
+  "task": "Add a spending summary card to the dashboard.",
+  "expect": {
+    "verdict": [
+      "AMBIGUOUS"
+    ]
+  },
+  "min_items": {
+    "findings": 3
+  },
+  "max_items": {
+    "findings": 7
+  },
+  "cited": true,
+  "unchanged": [
+    "prd.md"
+  ]
+}

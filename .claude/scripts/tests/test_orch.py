@@ -22,6 +22,11 @@ REAL_PR_PREFLIGHT = orch.pr_preflight
 
 # ── fakes ─────────────────────────────────────────────────────────────────────
 
+PRD = ("# PRD: add a thing\n\n## Goal\n\nShow the monthly total on the dashboard.\n\n## Acceptance criteria\n\n"
+       "1. The dashboard shows the total of recent expenses in the header card.\n"
+       "2. An empty month shows **zero**, not a blank card.\n3. The total updates after an expense is added.\n\n"
+       "## Out of scope\n\n- budgets\n")
+
 def _sandbox(root):
     def run(args):
         run_id = args[1]
@@ -120,8 +125,13 @@ class Agents:
         return os.path.join(self.root, "runs", inst["run_id"])
 
     def product(self, inst):
-        open(os.path.join(self.run_dir(inst), "prd.md"), "w").write("# PRD\n")
+        open(os.path.join(self.run_dir(inst), "prd.md"), "w").write(PRD)
         return "PRD done.\n\n## RESULT\nstatus: DONE\ncriteria_count: 3\nsummary: three criteria\n"
+
+    def prd_reviewer(self, verdict="CLEAR", findings=("none",)):
+        def run(inst):
+            return "## RESULT\nverdict: {}\nfindings:\n{}\n".format(verdict, "\n".join("- " + f for f in findings))
+        return run
 
     def architect(self, inst):
         d = self.run_dir(inst)
@@ -156,7 +166,10 @@ class Agents:
     def render_reviewer(self, verdict="PASS"):
         def run(inst):
             open(os.path.join(self.run_dir(inst), "render-review.md"), "w").write("# review\n")
-            blocking = "- B1 home: totals shown twice (after/home.png)" if verdict == "FAIL" else "- none"
+            shot = os.path.join(self.run_dir(inst), "render", "after", "home.desktop.png")
+            os.makedirs(os.path.dirname(shot), exist_ok=True)
+            open(shot, "wb").close()
+            blocking = "- B1 home: totals shown twice (after/home.desktop.png)" if verdict == "FAIL" else "- none"
             return "## RESULT\nverdict: {}\ntargets_reviewed: 1\nscreenshots_viewed: 2\nblocking:\n{}\nnotes:\n- none\n" \
                 .format(verdict, blocking)
         return run
@@ -196,7 +209,8 @@ class Pipe:
         self.root, self.repo, self.fake, self.agents, self.capsys = root, repo, fake, agents, capsys
         self.id = None
         self.gotchas = []
-        self.responders = {"product": agents.product, "architect": agents.architect, "tester": agents.tester,
+        self.responders = {"product": agents.product, "prd-review": agents.prd_reviewer(),
+                           "architect": agents.architect, "tester": agents.tester,
                            "test-reviewer": agents.reviewer(), "coder": agents.coder,
                            "render-reviewer": agents.render_reviewer(), "adr": agents.adr}
         self.spawned = []
@@ -357,8 +371,9 @@ def test_start_asks_about_unmerged_branch(env):
 # ── retry caps ────────────────────────────────────────────────────────────────
 
 def test_contract_check_retry_cap_trips_after_two_retries(env):
+    """Unattended: no one to triage, so the cap stops the run as it always did."""
     env.fake.on("check-contract.py:tests", (1, "UNDECLARED_TESTID foo {not-a-format-field}"))
-    inst = env.drive(env.start())
+    inst = env.drive(env.start("--unattended"))
     assert inst["action"] == "stop" and "retry cap reached (2/2)" in inst["message"]
     assert "--from tester" in inst["message"]
     st = env.state()
@@ -382,13 +397,23 @@ def test_contract_check_retry_cap_trips_after_two_retries(env):
 def test_sandbox_fail_retry_cap(env):
     env.fake.sandbox.code, env.fake.sandbox.verdict = 1, "FAIL"
     inst = env.drive(env.start())
-    assert inst["action"] == "stop" and "Coder retry cap reached (2/2)" in inst["message"]
+    # Escalation ladder: the cap asks a person instead of stopping.
+    assert inst["action"] == "ask" and inst["id"] == "triage:coder", inst
+    assert "Coder retry cap reached (2/2)" in inst["question"] and "expected 2 got 3" in inst["question"]
+    assert inst["options"] == orch.triage_options("coder")
+    assert env.state()["pause_reason"] == "awaiting_triage"
     coder = [i for i in env.spawned if i["stage"] == "coder"]
     assert len(coder) == 3
     assert "expected 2 got 3" in coder[1]["prompt"] and "Full test output: runs/" in coder[1]["prompt"]
+    # Only the last automatic attempt is boosted.
+    assert [(i["model"], i["effort"]) for i in coder] == [(None, None), (None, None), ("opus", "xhigh")]
+    assert "[ladder] coder: last automatic attempt runs on opus at effort xhigh" in env.report()
     fixes = env.fake.called("commit-code.py", str(env.repo), env.id, "--fix")
     assert [c[4] for c in fixes] == ["address sandbox failures (retry 1/2)", "address sandbox failures (retry 2/2)"]
     assert env.state()["retry_count"] == 2
+    inst = env.feed(inst, orch.T_STOP)
+    assert inst["action"] == "stop" and "Coder retry cap reached (2/2)" in inst["message"]
+    assert (env.state()["status"], env.state()["pause_reason"]) == ("failed", "retry-cap")
 
 
 # ── small runs and escalation ─────────────────────────────────────────────────
@@ -930,6 +955,8 @@ def test_missing_result_file_is_a_usage_error_and_run_keeps_waiting(env):
     assert env.state()["pending"]["stage"] == "product"
     assert "FAILED" not in env.report()
     inst = env.feed(inst, env.agents.product(inst))
+    assert spawn_of("prd-review")(inst)
+    inst = env.feed(inst, env.agents.prd_reviewer()(inst))
     assert spawn_of("architect")(inst)
 
 
@@ -1168,3 +1195,234 @@ def test_pr_now_checks_first(env, monkeypatch):
     monkeypatch.setattr(orch, "pr_preflight", lambda repo: ["the repo has no `origin` remote"])
     again = env.cmd("pr", env.id, "now")
     assert "Can't open the pull request yet" in again["message"]
+
+
+# ── PRD review (ambiguity hunt, stage 1b) ─────────────────────────────────────
+
+CITED = '[vague-term] "the total of recent expenses" — A: last 30 days; B: this month; settle: name the period'
+UNCITED = '[vague-term] "the sum of all old expenses" — A: x; B: y; settle: z'
+
+
+def test_prd_review_findings_go_back_to_product_once(env):
+    env.responders["prd-review"] = env.agents.prd_reviewer("AMBIGUOUS", [CITED, UNCITED])
+    inst = env.drive(env.start(), until=lambda i: spawn_of("product")(i) and "FEEDBACK:" in i["prompt"])
+    assert "the total of recent expenses" in inst["prompt"] and "sum of all old" not in inst["prompt"]
+    assert "NEEDS_INPUT" in inst["prompt"] and "unattended" not in inst["prompt"]
+    d = env.root / "runs" / env.id
+    assert "recent expenses" in (d / "prd-review.md").read_text()
+    assert (d / "archive" / "prd_before_review.md").exists()
+    rep = env.report()
+    assert "[prd-review] dropped 1 finding(s) that cite nothing" in rep and "sum of all old" in rep
+    assert "[prd-review] AMBIGUOUS — 1 finding(s), back to the Product agent" in rep
+    inst = env.drive(inst)
+    assert inst["status"] == "done"
+    assert [i["stage"] for i in env.spawned][:4] == ["product", "prd-review", "product", "architect"]
+
+
+def test_prd_review_clear_goes_to_architect(env):
+    inst = env.drive(env.start(), until=spawn_of("architect"))
+    assert "[prd-review] CLEAR" in env.report()
+    assert [i["stage"] for i in env.spawned] == ["product", "prd-review"]
+    assert env.spawned[1]["agent"] == "orch-prd-reviewer"
+
+
+def test_prd_review_uncited_only_asks_once_then_counts_as_clear(env):
+    env.responders["prd-review"] = env.agents.prd_reviewer("AMBIGUOUS", [UNCITED])
+    inst = env.drive(env.start(), until=lambda i: spawn_of("prd-review")(i) and "CITATION_RETRY" in i["prompt"])
+    assert "sum of all old" in inst["prompt"]
+    inst = env.drive(inst, until=spawn_of("architect"))
+    assert sum(1 for i in env.spawned if i["stage"] == "prd-review") == 2
+    assert "[prd-review] CLEAR (no cited findings left)" in env.report()
+    assert not any(i["stage"] == "product" and "FEEDBACK:" in i["prompt"] for i in env.spawned)
+
+
+def test_prd_review_caps_findings(env):
+    many = ['[vague-term] "the total of recent expenses" — finding {}'.format(n) for n in range(9)]
+    env.responders["prd-review"] = env.agents.prd_reviewer("AMBIGUOUS", many)
+    inst = env.drive(env.start(), until=lambda i: spawn_of("product")(i) and "FEEDBACK:" in i["prompt"])
+    assert "finding 6" in inst["prompt"] and "finding 7" not in inst["prompt"]
+    assert "[prd-review] kept the first 7 of 9 findings" in env.report()
+
+
+def test_prd_review_unattended_asks_product_for_assumptions(env):
+    env.responders["prd-review"] = env.agents.prd_reviewer("AMBIGUOUS", [CITED])
+    inst = env.drive(env.start("--unattended"), until=lambda i: spawn_of("product")(i) and "FEEDBACK:" in i["prompt"])
+    assert "This run is unattended" in inst["prompt"]
+
+
+def test_prd_review_blocked_stops_and_resumes(env):
+    env.responders["prd-review"] = lambda inst: "## RESULT\nverdict: BLOCKED\nfindings:\n- none\nblocked_reason: prd.md is empty\n"
+    inst = env.drive(env.start())
+    assert inst["action"] == "stop" and "prd.md is empty" in inst["message"] and "--from prd-review" in inst["message"]
+    assert (env.state()["status"], env.state()["pause_reason"]) == ("failed", "reviewer-blocked")
+    env.responders["prd-review"] = env.agents.prd_reviewer()
+    inst = env.cmd("resume", env.id, "--from", "prd-review")
+    assert spawn_of("prd-review")(inst)
+    assert env.drive(inst)["status"] == "done"
+
+
+def test_prd_review_skipped_when_forced_small(env):
+    inst = env.drive(env.start("--size", "small"), until=spawn_of("architect"))
+    assert "[prd-review] SKIPPED — run forced small (--size small)" in env.report()
+    assert not any(i["stage"] == "prd-review" for i in env.spawned)
+
+
+def test_quotes_source_ignores_emphasis_and_line_breaks():
+    prd = "1. An empty month shows **zero**, not a\nblank card."
+    assert orch.quotes_source('[x] "shows zero, not a blank card" — A', prd)
+    assert orch.quotes_source('[x] “empty month shows zero” — A', prd)
+    assert not orch.quotes_source('[x] "shows zero" — too short to be a citation', prd)
+    assert not orch.quotes_source('[x] "shows nothing, not a blank card" — not in the PRD', prd)
+    assert not orch.quotes_source("[x] no quote at all", prd)
+
+
+def test_prd_criteria_count():
+    assert orch.prd_criteria_count(PRD) == 3
+    assert orch.prd_criteria_count("# PRD\n\nno criteria section\n") == 0
+
+
+# ── reviewer output contract: test-reviewer and render-reviewer ───────────────
+
+def test_test_review_uncited_failures_are_dropped_cited_ones_kept(env):
+    env.responders["test-reviewer"] = env.agents.reviewer("FAIL", [
+        "B1: tests/thing.test.js:thing - only checks the card renders", "B3: some test somewhere - magic value",
+        "C1: criterion 2 has no test", "C1: criterion 9 has no test"])
+    inst = env.drive(env.start(), until=lambda i: spawn_of("tester")(i) and "FEEDBACK:" in i["prompt"])
+    assert "only checks the card renders" in inst["prompt"] and "criterion 2 has no test" in inst["prompt"]
+    assert "magic value" not in inst["prompt"] and "criterion 9" not in inst["prompt"]
+    assert "[test-reviewer] dropped 2 finding(s)" in env.report()
+
+
+def test_test_review_fail_without_citations_retries_once_then_stops(env):
+    env.responders["test-reviewer"] = env.agents.reviewer("FAIL", ["B2: the tests look weak"])
+    inst = env.drive(env.start(), until=lambda i: spawn_of("test-reviewer")(i) and "CITATION_RETRY" in i["prompt"])
+    assert "the tests look weak" in inst["prompt"]
+    inst = env.drive(inst)
+    assert inst["action"] == "stop" and "--from test-reviewer" in inst["message"]
+    assert (env.state()["status"], env.state()["pause_reason"]) == ("failed", "result-malformed")
+    assert not any(c for c in env.fake.called("review-delta.py") if c[3] == "mark")  # nothing was recorded as reviewed
+
+
+def test_test_review_blocked_stops(env):
+    env.responders["test-reviewer"] = lambda inst: ("## RESULT\nverdict: BLOCKED\nchecklist: none\n"
+                                                    "blocked_reason: runs/x/tests is empty\n")
+    inst = env.drive(env.start())
+    assert inst["action"] == "stop" and "orch-test-reviewer couldn't do its review" in inst["message"]
+    assert env.state()["pause_reason"] == "reviewer-blocked"
+
+
+def test_render_review_uncited_blocking_becomes_a_note(env):
+    env.fake.on("render-capture.mjs", _render(str(env.root), 0, ""))
+
+    def reviewer(inst):
+        open(os.path.join(env.agents.run_dir(inst), "render-review.md"), "w").write("# review\n")
+        return ("## RESULT\nverdict: FAIL\ntargets_reviewed: 1\nscreenshots_viewed: 2\nblocking:\n"
+                "- B1 home: totals shown twice (after/missing.png)\nnotes:\n- none\n")
+    env.responders["render-reviewer"] = reviewer
+    inst = env.drive(env.start(), until=lambda i: spawn_of("render-reviewer")(i) and "CITATION_RETRY" in i["prompt"])
+    inst = env.drive(inst)
+    assert inst["status"] == "done"
+    assert not any(i["stage"] == "coder" and "rendered page" in i["prompt"] for i in env.spawned)
+    rep = env.report()
+    assert "[render-reviewer] PASS (no cited BLOCKING finding left)" in rep
+    assert "dropped 1 finding(s)" in rep and "after/missing.png" in rep
+
+
+def test_render_review_last_retry_is_boosted(env):
+    env.fake.on("render-capture.mjs", _render(str(env.root), 0, ""))
+    env.responders["render-reviewer"] = env.agents.render_reviewer("FAIL")
+    inst = env.drive(env.start())
+    assert inst["action"] == "stop" and "Render-review retry cap reached" in inst["message"]
+    render_fixes = [i for i in env.spawned if i["stage"] == "coder" and "rendered page" in i["prompt"]]
+    assert [(i["model"], i["effort"]) for i in render_fixes] == [(None, None), ("opus", "xhigh")]
+
+
+# ── escalation ladder: triage at the cap ──────────────────────────────────────
+
+def test_triage_choice_parsing():
+    c = orch.T_MORE.format("Coder")
+    assert orch.triage_choice("coder", c) == ("more", "")
+    assert orch.triage_choice("coder", "One more Coder attempt: the fixture date is UTC") == \
+        ("more", "the fixture date is UTC")
+    assert orch.triage_choice("coder", orch.T_TESTS + " — test 2 expects cents") == ("tests", "test 2 expects cents")
+    assert orch.triage_choice("coder", orch.T_CRITERION)[0] == "criterion"
+    assert orch.triage_choice("coder", "stop, I'll look myself") == ("stop", "")
+    assert orch.triage_choice("coder", "check the rounding in total()") == ("more", "check the rounding in total()")
+    assert orch.triage_choice("tester", orch.T_PLAN)[0] == "plan"
+    assert orch.triage_choice("tester", orch.T_TESTS)[0] == "more"   # not an option for the Tester: it's a hint
+
+
+def _to_coder_triage(env):
+    env.fake.sandbox.code, env.fake.sandbox.verdict = 1, "FAIL"
+    inst = env.drive(env.start())
+    assert inst["action"] == "ask" and inst["id"] == "triage:coder", inst
+    return inst
+
+
+def test_triage_one_more_attempt_with_hint(env):
+    inst = _to_coder_triage(env)
+    inst = env.feed(inst, "One more Coder attempt: the fixture date is UTC")
+    assert spawn_of("coder")(inst) and (inst["model"], inst["effort"]) == ("opus", "xhigh")
+    assert "the fixture date is UTC" in inst["prompt"] and "expected 2 got 3" in inst["prompt"]
+    env.fake.sandbox.code, env.fake.sandbox.verdict = 0, "PASS"
+    inst = env.drive(inst)
+    assert inst["status"] == "done"
+    assert "[triage] coder: more — hint: the fixture date is UTC" in env.report()
+
+
+def test_triage_one_more_attempt_fails_again_asks_again(env):
+    inst = _to_coder_triage(env)
+    inst = env.drive(env.feed(inst, "check total()"))
+    assert inst["action"] == "ask" and inst["id"] == "triage:coder"
+    assert sum(1 for i in env.spawned if i["stage"] == "coder") == 4
+
+
+def test_triage_tests_are_wrong_goes_through_tester_and_review(env):
+    inst = _to_coder_triage(env)
+    inst = env.feed(inst, orch.T_TESTS + " — the total should be in cents")
+    assert spawn_of("tester")(inst)
+    assert "decided the tests are wrong" in inst["prompt"] and "in cents" in inst["prompt"]
+    assert "expected 2 got 3" in inst["prompt"]
+    inst = env.drive(inst, until=spawn_of("test-reviewer"))
+    assert "A person triaged the Coder's repeated failures" in inst["prompt"]
+    env.fake.sandbox.code, env.fake.sandbox.verdict = 0, "PASS"
+    inst = env.drive(inst)
+    assert inst["status"] == "done"
+
+
+def test_triage_criterion_is_wrong_stops_for_the_prd(env):
+    inst = _to_coder_triage(env)
+    inst = env.feed(inst, orch.T_CRITERION)
+    assert inst["action"] == "stop" and "prd.md" in inst["message"] and "--from architect" in inst["message"]
+    assert (env.state()["status"], env.state()["pause_reason"]) == ("paused", "criterion-disputed")
+
+
+def test_tester_cap_triage_plan_is_wrong(env):
+    env.fake.on("check-contract.py:tests", (1, "UNDECLARED_TESTID foo"))
+    inst = env.drive(env.start())
+    assert inst["action"] == "ask" and inst["id"] == "triage:tester"
+    assert inst["options"] == orch.triage_options("tester")
+    testers = [i for i in env.spawned if i["stage"] == "tester"]
+    assert (testers[-1]["model"], testers[-1]["effort"]) == ("opus", "xhigh")
+    inst = env.feed(inst, orch.T_PLAN)
+    assert inst["action"] == "stop" and "--from architect" in inst["message"]
+    assert env.state()["pause_reason"] == "contract-disputed"
+
+
+def test_tester_cap_triage_stop(env):
+    env.fake.on("check-contract.py:tests", (1, "UNDECLARED_TESTID foo"))
+    inst = env.feed(env.drive(env.start()), "Stop here")
+    assert inst["action"] == "stop" and "Contract check retry cap reached (2/2)" in inst["message"]
+    assert "for the feedback" in inst["message"] and "--from tester" in inst["message"]
+
+
+def test_cites_test_accepts_the_usual_spellings(env):
+    env.drive(env.start(), until=spawn_of("test-reviewer"))
+    r = orch.Run(env.id).load()
+    run_rel = "runs/{}/tests/tests/thing.test.js".format(env.id)
+    for f in ("B1: tests/thing.test.js:thing - x", "B1: thing.test.js - x", "B1: {}:thing - x".format(run_rel),
+              "B1: {} - x".format(env.root / run_rel), "C1: criterion 3 - no test", "C1: AC-1 has no test",
+              "B1: package.json is not a test but exists in the repo"):
+        assert orch.cites_test(r, f, 3), f
+    for f in ("B1: tests/other.test.js - x", "C1: criterion 4 - no test", "B2: the tests look weak"):
+        assert not orch.cites_test(r, f, 3), f

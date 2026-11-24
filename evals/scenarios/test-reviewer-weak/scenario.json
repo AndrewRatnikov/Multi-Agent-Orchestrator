@@ -1,0 +1,15 @@
+{
+  "about": "Test-reviewer rejects tests that assert nothing and miss criteria, citing file and criterion",
+  "agent": "orch-test-reviewer",
+  "repo": "repo-budget",
+  "task": "Add a monthly total to the budget module: sum one month's expenses and format cents as euros.",
+  "expect": {
+    "verdict": [
+      "FAIL"
+    ]
+  },
+  "min_items": {
+    "failures": 2
+  },
+  "cited": true
+}

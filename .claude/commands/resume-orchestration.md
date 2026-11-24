@@ -16,8 +16,8 @@ Parse `$ARGUMENTS` as `{RUN_ID} [--from {STEP}] [--no-pr]`, for example:
 - `run_20260626_143022`: resume where the run stopped (the `step` in its state);
 - `run_20260626_143022 --from architect`: resume from a specific step.
 
-Valid steps: `product`, `architect`, `render-setup`, `tester`, `test-reviewer`, `coder`, `sandbox`,
-`verify`, `render`, `adr`.
+Valid steps: `product`, `prd-review`, `architect`, `render-setup`, `tester`, `test-reviewer`, `coder`,
+`sandbox`, `verify`, `render`, `adr`.
 
 If no RUN_ID is given, list the folders in `runs/` with the `step` and `status` lines of each
 `state.md`, and ask the user which to resume.
@@ -67,6 +67,14 @@ What `resume` does, so you can explain it (you don't do any of it yourself):
   those files instead of adding new ones.
 - **Scope violation** (`pause_reason: scope-violation`): a subagent wrote into REPO. Show the
   user the files; they clean up, then resume.
+- **PRD review.** Resuming from `product` or `prd-review` runs the PRD review again on the new or
+  edited prd.md. `--from prd-review` after a `reviewer-blocked` stop re-runs just the review.
+- **Triage at a retry cap** (`pause_reason: awaiting_triage`): the user didn't answer the triage
+  question. A plain resume continues as a fix pass from the paused step, like any cap.
+  `criterion-disputed` / `contract-disputed`: the user said the PRD or plan is wrong; once they've
+  edited it, `--from architect`.
+- **Reviewer BLOCKED** (`pause_reason: reviewer-blocked`): a reviewer couldn't read an input; the
+  stop message names it. Fix that, then resume from the step it names.
 
 ## Completion
 
